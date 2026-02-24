@@ -302,21 +302,18 @@ with tab_breakdown:
                                      f"Composite Score ({feas_pct}F/{attr_pct}A)")
     st.plotly_chart(fig_comp, use_container_width=True)
 
-    col_l, col_r = st.columns(2)
-    with col_l:
-        st.markdown("#### Ranked by Feasibility")
-        if feas_comp_cols:
-            fig_fb = _make_breakdown_chart(breakdown_df, "feasibility_score", feas_comp_cols,
-                                           feas_labels, feas_comp_weights, GL_PALETTE_EXT[:4],
-                                           "Feasibility Breakdown")
-            st.plotly_chart(fig_fb, use_container_width=True)
+    st.markdown("#### Ranked by Feasibility")
+    if feas_comp_cols:
+        fig_fb = _make_breakdown_chart(breakdown_df, "feasibility_score", feas_comp_cols,
+                                       feas_labels, feas_comp_weights, GL_PALETTE_EXT[:4],
+                                       "Feasibility Breakdown")
+        st.plotly_chart(fig_fb, use_container_width=True)
 
-    with col_r:
-        st.markdown("#### Ranked by Attractiveness")
-        if attr_comp_cols:
-            fig_ab = _make_breakdown_chart(breakdown_df, "attractiveness_score", attr_comp_cols,
-                                           attr_labels, attr_comp_weights, GL_PALETTE_EXT[4:9],
-                                           "Attractiveness Breakdown")
+    st.markdown("#### Ranked by Attractiveness")
+    if attr_comp_cols:
+        fig_ab = _make_breakdown_chart(breakdown_df, "attractiveness_score", attr_comp_cols,
+                                       attr_labels, attr_comp_weights, GL_PALETTE_EXT[4:9],
+                                       "Attractiveness Breakdown")
             st.plotly_chart(fig_ab, use_container_width=True)
 
 
