@@ -37,21 +37,21 @@ with st.sidebar:
     st.header("Likelihood Weights")
     st.markdown("Adjust weights for each likelihood dimension (will be normalized to 100%).")
 
-    w_carriers = st.slider("Energy (Fuel+Electricity) Intensity", 0, 100, 25, key="w_carriers",
-                           help="Higher = products with high total energy intensity (fuel + electricity) score higher")
-    w_elec = st.slider("Electricity intensity", 0, 100, 25, key="w_elec",
+    w_fuel = st.slider("Fuel Energy Intensity", 0, 100, 25, key="w_fuel",
+                       help="Higher = products with high fuel energy intensity score higher")
+    w_elec = st.slider("Electricity Intensity", 0, 100, 25, key="w_elec",
                        help="Higher = products with high electricity usage per $ score higher")
-    w_vuln = st.slider("Incumbent vulnerability", 0, 100, 25, key="w_vuln",
+    w_vuln = st.slider("Incumbent Vulnerability", 0, 100, 25, key="w_vuln",
                        help="Higher = products where incumbents are energy-deficit score higher")
-    w_cbam = st.slider("CBAM exposure", 0, 100, 25, key="w_cbam",
+    w_cbam = st.slider("CBAM Exposure", 0, 100, 25, key="w_cbam",
                        help="Higher = CBAM-covered products with EU exposure score higher")
 
-    total_w = w_carriers + w_elec + w_vuln + w_cbam
+    total_w = w_fuel + w_elec + w_vuln + w_cbam
     if total_w == 0:
         st.error("At least one weight must be > 0")
         st.stop()
 
-    st.caption(f"**Effective weights:** Carriers {w_carriers/total_w*100:.0f}% | "
+    st.caption(f"**Effective weights:** Fuel {w_fuel/total_w*100:.0f}% | "
                f"Electricity {w_elec/total_w*100:.0f}% | "
                f"Vulnerability {w_vuln/total_w*100:.0f}% | "
                f"CBAM {w_cbam/total_w*100:.0f}%")
@@ -80,7 +80,7 @@ with st.sidebar:
 # COMPUTE LIKELIHOOD SCORES
 # ============================================================
 weights = {
-    "carriers_pctile": w_carriers,
+    "fuel_pctile": w_fuel,
     "elec_pctile": w_elec,
     "vulnerability_pctile": w_vuln,
     "cbam_pctile": w_cbam,
@@ -88,7 +88,7 @@ weights = {
 
 # Build component percentiles
 components = {}
-components["carriers_pctile"] = percentile_rank(df["amount_carriers"].fillna(0))
+components["fuel_pctile"] = percentile_rank(df["amount_fuel_energy"].fillna(0))
 components["elec_pctile"] = percentile_rank(df["amount_electric_energy"].fillna(0))
 # Vulnerability: more negative = more vulnerable for incumbents = better for powershoring
 if "vulnerability_score" in df.columns:
@@ -123,7 +123,7 @@ if st.session_state.get("_pending_scenario_save"):
     _sname = st.session_state.pop("_pending_scenario_save")
     if "saved_scenarios" not in st.session_state:
         st.session_state.saved_scenarios = {}
-    _weight_desc = (f"Energy(F+E) {w_carriers/total_w*100:.0f}%, "
+    _weight_desc = (f"Fuel {w_fuel/total_w*100:.0f}%, "
                     f"Electricity {w_elec/total_w*100:.0f}%, "
                     f"Vulnerability {w_vuln/total_w*100:.0f}%, "
                     f"CBAM {w_cbam/total_w*100:.0f}%")
@@ -148,7 +148,7 @@ col5.metric("Score Cutoff", f"{cutoff:.1f}")
 # WEIGHT VISUALIZATION
 # ============================================================
 weight_labels = {
-    "carriers_pctile": "Energy (Fuel+Electricity) Intensity",
+    "fuel_pctile": "Fuel Energy Intensity",
     "elec_pctile": "Electricity Intensity",
     "vulnerability_pctile": "Incumbent Vulnerability",
     "cbam_pctile": "CBAM Exposure",
@@ -200,7 +200,7 @@ with tab_dist:
 with tab_treemap:
     st.markdown("**What industries are selected after likelihood scoring?**")
     treemap_metric = st.radio(
-        "Size by:", ["global_export_value", "amount_carriers", "amount_electric_energy"],
+        "Size by:", ["global_export_value", "amount_fuel_energy", "amount_electric_energy"],
         format_func=lambda x: VARIABLE_LABELS.get(x, x),
         horizontal=True,
         key="likelihood_treemap_metric",
@@ -215,7 +215,7 @@ with tab_treemap:
 with tab_table:
     display_cols = [
         "hs_product_code", "description", "hs2_name",
-        "likelihood_score", "carriers_pctile", "elec_pctile",
+        "likelihood_score", "fuel_pctile", "elec_pctile",
         "vulnerability_pctile", "cbam_pctile",
         "global_export_value", "amount_electric_energy",
         "cbam_flag", "rca_mar",
@@ -233,7 +233,7 @@ with tab_table:
     )
     st.markdown(f"**{len(selected)} products** selected (score >= {cutoff:.1f})")
     download_csv(selected, "powershoring_likelihood_products.csv",
-                 f"Likelihood cutoff={cutoff:.1f}, weights: carriers={w_carriers}, elec={w_elec}, vuln={w_vuln}, cbam={w_cbam}")
+                 f"Likelihood cutoff={cutoff:.1f}, weights: fuel={w_fuel}, elec={w_elec}, vuln={w_vuln}, cbam={w_cbam}")
 
 # --- COMPONENT BREAKDOWN ---
 with tab_breakdown:

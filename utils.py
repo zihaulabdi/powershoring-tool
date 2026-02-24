@@ -245,32 +245,32 @@ def format_dollars(value):
 # ============================================================
 SCENARIO_DEFS = {
     "No Prior": {
-        "weights": {"carriers": 25, "elec": 25, "vuln": 25, "cbam": 25, "growth": 0},
+        "weights": {"fuel": 25, "elec": 25, "vuln": 25, "cbam": 25, "growth": 0},
         "pre_filter": None,
         "desc": "Equal weight baseline — no assumption about which driver matters most.",
     },
     "Electricity Intensity": {
-        "weights": {"carriers": 0, "elec": 100, "vuln": 0, "cbam": 0, "growth": 0},
+        "weights": {"fuel": 0, "elec": 100, "vuln": 0, "cbam": 0, "growth": 0},
         "pre_filter": None,
         "desc": "Pure electricity cost mechanism — industries with highest electricity share of costs.",
     },
     "Fuel + Electricity": {
-        "weights": {"carriers": 50, "elec": 50, "vuln": 0, "cbam": 0, "growth": 0},
+        "weights": {"fuel": 50, "elec": 50, "vuln": 0, "cbam": 0, "growth": 0},
         "pre_filter": None,
         "desc": "Both fuel and electricity intensity — captures current and emerging electrification.",
     },
     "CBAM Dominant": {
-        "weights": {"carriers": 0, "elec": 0, "vuln": 0, "cbam": 100, "growth": 0},
+        "weights": {"fuel": 0, "elec": 0, "vuln": 0, "cbam": 100, "growth": 0},
         "pre_filter": "cbam",
         "desc": "EU regulatory pressure — pre-filtered to CBAM-covered products only.",
     },
     "Disruption Opportunity": {
-        "weights": {"carriers": 0, "elec": 0, "vuln": 100, "cbam": 0, "growth": 0},
+        "weights": {"fuel": 0, "elec": 0, "vuln": 100, "cbam": 0, "growth": 0},
         "pre_filter": None,
         "desc": "Incumbent vulnerability — where current exporters are most energy-deficit.",
     },
     "Market Growth": {
-        "weights": {"carriers": 0, "elec": 0, "vuln": 0, "cbam": 0, "growth": 100},
+        "weights": {"fuel": 0, "elec": 0, "vuln": 0, "cbam": 0, "growth": 100},
         "pre_filter": None,
         "desc": "Fastest-growing global trade — expanding markets with easier entry.",
     },
@@ -285,7 +285,7 @@ def run_scenario_scoring(df, likelihood_weights, feas_weights, attr_weights):
 
     Args:
         df: Filtered product DataFrame (Stage 1 output).
-        likelihood_weights: Dict with keys carriers, elec, vuln, cbam, growth.
+        likelihood_weights: Dict with keys fuel, elec, vuln, cbam, growth.
         feas_weights: Dict with keys rca, density, hhi, distance.
         attr_weights: Dict with keys market_size, growth, cog, pci, spillover.
 
@@ -297,7 +297,7 @@ def run_scenario_scoring(df, likelihood_weights, feas_weights, attr_weights):
 
     # Likelihood components
     comps = {}
-    comps["carriers"] = percentile_rank(d["amount_carriers"].fillna(0))
+    comps["fuel"] = percentile_rank(d["amount_fuel_energy"].fillna(0))
     comps["elec"] = percentile_rank(d["amount_electric_energy"].fillna(0))
     comps["vuln"] = (
         percentile_rank(-d["vulnerability_score"].fillna(0))
