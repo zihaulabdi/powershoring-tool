@@ -56,8 +56,8 @@ else:
     df = df_all.copy()
     st.warning("No prior filtering applied — using full product universe.")
 
-COLOR_VARS = ["hs2_name", "cbam_flag", "green_supply_chain_flag", "green_topic"]
-COLOR_VARS = [v for v in COLOR_VARS if v in df.columns]
+COLOR_VARS = ["top_n", "hs2_name", "cbam_flag", "green_supply_chain_flag", "green_topic"]
+COLOR_VARS = [v for v in COLOR_VARS if v in df.columns or v == "top_n"]
 
 # ============================================================
 # SIDEBAR
@@ -94,18 +94,23 @@ with st.sidebar:
                             help="Network centrality — benefits to related industries")
 
     st.divider()
+    _color_labels = {**VARIABLE_LABELS, "top_n": "Top N (by composite score)"}
     color_var = st.selectbox("Color by", COLOR_VARS, key="color_multi",
-                             format_func=lambda x: VARIABLE_LABELS.get(x, x))
-    label_top = st.slider("Label top N", 0, 30, 10, key="prio_label_multi")
+                             format_func=lambda x: _color_labels.get(x, x))
+    label_top = st.slider("Label top N", 0, 50, 30, key="prio_label_multi")
 
 
 # ============================================================
 # HELPER: prepare color column for categorical flags
 # ============================================================
-def prepare_color(plot_df, col):
+def prepare_color(plot_df, col, top_n_count=30):
     """Return (df_copy, color_col_name) with proper categorical handling."""
     out = plot_df.copy()
-    if col == "cbam_flag":
+    if col == "top_n":
+        top_codes = set(out.nlargest(top_n_count, "composite_score").index)
+        out["_color"] = out.index.map(lambda i: f"Top {top_n_count}" if i in top_codes else "Other")
+        return out, "_color"
+    elif col == "cbam_flag":
         out["_color"] = out[col].map({1: "CBAM", 0: "Not CBAM"}).fillna("Not CBAM")
         return out, "_color"
     elif col == "green_supply_chain_flag":
@@ -117,9 +122,11 @@ def prepare_color(plot_df, col):
     return out, col
 
 
-def color_map_for(col, plot_df, color_col):
+def color_map_for(col, plot_df, color_col, top_n_count=30):
     """Return color_discrete_map or color_discrete_sequence kwargs."""
-    if col == "cbam_flag":
+    if col == "top_n":
+        return dict(color_discrete_map={f"Top {top_n_count}": MOROCCO_RED, "Other": GREY})
+    elif col == "cbam_flag":
         return dict(color_discrete_map={"CBAM": MOROCCO_RED, "Not CBAM": GREY})
     elif col == "green_supply_chain_flag":
         return dict(color_discrete_map={"Green SC": GL_PALETTE_EXT[2], "Not Green SC": GREY})
@@ -194,16 +201,22 @@ col4.metric(f"Avg Composite ({feas_pct}F/{attr_pct}A)", f"{df['composite_score']
 # ============================================================
 st.markdown("### Feasibility vs. Attractiveness")
 
-plot_df, color_col = prepare_color(df, color_var)
-ckwargs = color_map_for(color_var, plot_df, color_col)
+plot_df, color_col = prepare_color(df, color_var, top_n_count=label_top)
+ckwargs = color_map_for(color_var, plot_df, color_col, top_n_count=label_top)
 
 plot_df["_size"] = plot_df["global_export_value"].clip(lower=0).fillna(0) if "global_export_value" in plot_df.columns else 1
+
+# Category order: render "Other" first so Top N dots appear on top
+cat_order = {}
+if color_var == "top_n":
+    cat_order = {color_col: ["Other", f"Top {label_top}"]}
 
 fig = px.scatter(
     plot_df, x="feasibility_score", y="attractiveness_score",
     size="_size", size_max=30,
     color=color_col,
     **ckwargs,
+    category_orders=cat_order,
     hover_name="description" if "description" in plot_df.columns else None,
     hover_data={c: True for c in ["hs_product_code", "hs2_name", "composite_score"] if c in plot_df.columns},
     title=f"Feasibility vs. Attractiveness ({feas_pct}F / {attr_pct}A)",
