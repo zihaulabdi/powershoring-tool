@@ -272,11 +272,12 @@ with tab_breakdown:
             lambda r: f"HS {r[code_col]} — {str(r.get('description', ''))[:40]}", axis=1).tolist()
         fig = px.bar(bdf, x="value", y="product", color="component", orientation="h",
                      color_discrete_sequence=palette, title=title)
-        fig.update_layout(template=GL_TEMPLATE, height=max(400, len(ranked) * 18),
+        fig.update_layout(template=GL_TEMPLATE, height=max(500, len(ranked) * 28),
                           xaxis_title="Contribution to Score (%)", yaxis_title="",
-                          margin=dict(l=300), legend=dict(orientation="h", y=-0.1),
+                          margin=dict(l=350), legend=dict(orientation="h", y=-0.1),
                           xaxis=dict(range=[0, 100]))
-        fig.update_yaxes(categoryorder="array", categoryarray=product_order)
+        fig.update_yaxes(categoryorder="array", categoryarray=product_order,
+                         dtick=1, tickfont=dict(size=11))
         return fig
 
     feas_labels = {"feas_density": "Density", "feas_rca": "RCA", "feas_hhi": "HHI", "feas_distance": "Distance"}
