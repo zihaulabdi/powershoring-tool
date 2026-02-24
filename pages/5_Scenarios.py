@@ -256,61 +256,41 @@ with tab_quad:
     a_med = hs4_df["attractiveness_score"].median()
 
     hs4_df = hs4_df.copy()
-    hs4_df["quadrant"] = "Deprioritize"
-    hs4_df.loc[(hs4_df["feasibility_score"] >= f_med) & (hs4_df["attractiveness_score"] >= a_med), "quadrant"] = "Top Priorities"
-    hs4_df.loc[(hs4_df["feasibility_score"] >= f_med) & (hs4_df["attractiveness_score"] < a_med), "quadrant"] = "Low-Hanging Fruit"
-    hs4_df.loc[(hs4_df["feasibility_score"] < f_med) & (hs4_df["attractiveness_score"] >= a_med), "quadrant"] = "Strategic Bets"
 
-    # Top 10 to label
-    composite = 0.5 * hs4_df["feasibility_score"] + 0.5 * hs4_df["attractiveness_score"]
-    top10_idx = composite.nlargest(10).index
-
-    q_colors = {"Top Priorities": MOROCCO_RED, "Low-Hanging Fruit": "#8AB920",
-                "Strategic Bets": "#204B82", "Deprioritize": GREY}
+    # Top 10 to label by composite score
+    top10_idx = hs4_df.nlargest(10, rank_col).index
 
     trade_col = "global_export_value"
     hs4_df["_size"] = np.sqrt(hs4_df[trade_col].clip(lower=1) / 1e8).clip(4, 40)
 
     fig_q = go.Figure()
-    for q, color in q_colors.items():
-        mask = hs4_df["quadrant"] == q
-        subset = hs4_df[mask]
-        fig_q.add_trace(go.Scatter(
-            x=subset["feasibility_score"], y=subset["attractiveness_score"],
-            mode="markers", name=q,
-            marker=dict(size=subset["_size"], color=color, opacity=0.65, line=dict(width=0.5, color="white")),
-            text=subset.apply(lambda r: f"HS {r[code_col]} — {str(r.get('description', ''))[:30]}<br>"
-                              f"F={r['feasibility_score']:.0f} A={r['attractiveness_score']:.0f}<br>"
-                              f"Trade: {format_dollars(r[trade_col])}", axis=1),
-            hoverinfo="text",
-        ))
+    fig_q.add_trace(go.Scatter(
+        x=hs4_df["feasibility_score"], y=hs4_df["attractiveness_score"],
+        mode="markers", name="Products",
+        marker=dict(size=hs4_df["_size"], color=MOROCCO_RED, opacity=0.55,
+                    line=dict(width=0.5, color="white")),
+        text=hs4_df.apply(lambda r: f"HS {r[code_col]} — {str(r.get('description', ''))[:30]}<br>"
+                          f"F={r['feasibility_score']:.0f} A={r['attractiveness_score']:.0f}<br>"
+                          f"Trade: {format_dollars(r[trade_col])}", axis=1),
+        hoverinfo="text",
+    ))
 
     # Label top 10
     for idx in top10_idx:
         row = hs4_df.loc[idx]
         fig_q.add_annotation(
             x=row["feasibility_score"], y=row["attractiveness_score"],
-            text=f"HS {row[code_col]}", showarrow=True, arrowhead=0, arrowwidth=0.8,
+            text=f"HS {row[code_col]} — {str(row.get('description', ''))[:25]}",
+            showarrow=True, arrowhead=0, arrowwidth=0.8,
             font=dict(size=8, color="#333"), ax=20, ay=-15,
         )
-
-    fig_q.add_hline(y=a_med, line_dash="dot", line_color=GREY, line_width=1)
-    fig_q.add_vline(x=f_med, line_dash="dot", line_color=GREY, line_width=1)
 
     fig_q.update_layout(
         template=GL_TEMPLATE,
         title=dict(text=f"{focus_scenario} — Feasibility vs Attractiveness", font=dict(color=MOROCCO_RED)),
         xaxis_title="Feasibility Score", yaxis_title="Attractiveness Score",
-        height=600, showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=-0.15, font=dict(size=11)),
+        height=600, showlegend=False,
     )
-    st.plotly_chart(fig_q, use_container_width=True)
-
-    # Quadrant counts
-    qc = hs4_df["quadrant"].value_counts()
-    qcols = st.columns(4)
-    for i, q in enumerate(["Top Priorities", "Low-Hanging Fruit", "Strategic Bets", "Deprioritize"]):
-        qcols[i].metric(q, qc.get(q, 0))
 
     # Score breakdowns
     st.markdown("#### Score Composition — Top 20")
