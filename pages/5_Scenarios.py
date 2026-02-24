@@ -274,7 +274,7 @@ with tab_breakdown:
                      color_discrete_sequence=palette, title=title)
         fig.update_layout(template=GL_TEMPLATE, height=max(500, len(ranked) * 28),
                           xaxis_title="Contribution to Score (%)", yaxis_title="",
-                          margin=dict(l=350), legend=dict(orientation="h", y=-0.1),
+                          margin=dict(l=350, b=80), legend=dict(orientation="h", y=-0.15),
                           xaxis=dict(range=[0, 100]))
         fig.update_yaxes(categoryorder="array", categoryarray=product_order,
                          dtick=1, tickfont=dict(size=11))
