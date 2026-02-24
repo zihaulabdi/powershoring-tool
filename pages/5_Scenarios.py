@@ -263,16 +263,16 @@ with tab_breakdown:
     feas_comp_cols = [c for c in ["feas_density", "feas_rca", "feas_hhi", "feas_distance"] if c in breakdown_df.columns]
     attr_comp_cols = [c for c in ["attr_pci", "attr_cog", "attr_market_size", "attr_growth", "attr_spillover"] if c in breakdown_df.columns]
 
-    def _make_breakdown_chart(df, sort_col, comp_cols, comp_labels, palette, title):
-        """Build a normalized 100% stacked horizontal bar chart ranked by sort_col."""
+    def _make_breakdown_chart(df, sort_col, comp_cols, comp_labels, comp_weights, palette, title):
+        """Build a normalized 100% stacked bar chart showing weighted contribution."""
         ranked = df.sort_values(sort_col, ascending=False)
         bar_data = []
         for _, row in ranked.iterrows():
             lbl = f"HS {row[code_col]} — {str(row.get('description', ''))[:40]}"
-            raw_vals = {c: max(row.get(c, 0), 0) for c in comp_cols}
-            total = sum(raw_vals.values())
+            weighted_vals = {c: max(row.get(c, 0), 0) * comp_weights.get(c, 1) for c in comp_cols}
+            total = sum(weighted_vals.values())
             for c in comp_cols:
-                pct = (raw_vals[c] / total * 100) if total > 0 else 0
+                pct = (weighted_vals[c] / total * 100) if total > 0 else 0
                 bar_data.append({"product": lbl, "component": comp_labels.get(c, c), "value": pct})
         bdf = pd.DataFrame(bar_data)
         product_order = ranked.sort_values(sort_col, ascending=True).apply(
@@ -280,7 +280,7 @@ with tab_breakdown:
         fig = px.bar(bdf, x="value", y="product", color="component", orientation="h",
                      color_discrete_sequence=palette, title=title)
         fig.update_layout(template=GL_TEMPLATE, height=max(400, len(ranked) * 18),
-                          xaxis_title="Weighted Contribution (%)", yaxis_title="",
+                          xaxis_title="Contribution to Score (%)", yaxis_title="",
                           margin=dict(l=300), legend=dict(orientation="h", y=-0.1),
                           xaxis=dict(range=[0, 100]))
         fig.update_yaxes(categoryorder="array", categoryarray=product_order)
@@ -290,13 +290,22 @@ with tab_breakdown:
     attr_labels = {"attr_pci": "PCI", "attr_cog": "COG", "attr_market_size": "Mkt Size",
                    "attr_growth": "Growth", "attr_spillover": "Spillover"}
 
+    # Map component columns to their user-chosen weights
+    feas_comp_weights = {"feas_density": fw_density, "feas_rca": fw_rca, "feas_hhi": fw_hhi, "feas_distance": fw_dist}
+    attr_comp_weights = {"attr_pci": aw_pci, "attr_cog": aw_cog, "attr_market_size": aw_mkt,
+                         "attr_growth": aw_grw, "attr_spillover": aw_spl}
+    # Composite weights: component weight × F or A share
+    composite_weights = {c: w * feas_pct for c, w in feas_comp_weights.items()}
+    composite_weights.update({c: w * attr_pct for c, w in attr_comp_weights.items()})
+
     # 3 panels
     st.markdown(f"#### Ranked by Composite Score ({feas_pct}F/{attr_pct}A)")
     all_comp_cols = feas_comp_cols + attr_comp_cols
     all_comp_labels = {**feas_labels, **attr_labels}
     all_palette = GL_PALETTE_EXT[:len(all_comp_cols)]
     fig_comp = _make_breakdown_chart(breakdown_df, rank_col, all_comp_cols, all_comp_labels,
-                                     all_palette, f"Composite Score ({feas_pct}F/{attr_pct}A)")
+                                     composite_weights, all_palette,
+                                     f"Composite Score ({feas_pct}F/{attr_pct}A)")
     st.plotly_chart(fig_comp, use_container_width=True)
 
     col_l, col_r = st.columns(2)
@@ -304,14 +313,16 @@ with tab_breakdown:
         st.markdown("#### Ranked by Feasibility")
         if feas_comp_cols:
             fig_fb = _make_breakdown_chart(breakdown_df, "feasibility_score", feas_comp_cols,
-                                           feas_labels, GL_PALETTE_EXT[:4], "Feasibility Breakdown")
+                                           feas_labels, feas_comp_weights, GL_PALETTE_EXT[:4],
+                                           "Feasibility Breakdown")
             st.plotly_chart(fig_fb, use_container_width=True)
 
     with col_r:
         st.markdown("#### Ranked by Attractiveness")
         if attr_comp_cols:
             fig_ab = _make_breakdown_chart(breakdown_df, "attractiveness_score", attr_comp_cols,
-                                           attr_labels, GL_PALETTE_EXT[4:9], "Attractiveness Breakdown")
+                                           attr_labels, attr_comp_weights, GL_PALETTE_EXT[4:9],
+                                           "Attractiveness Breakdown")
             st.plotly_chart(fig_ab, use_container_width=True)
 
 
