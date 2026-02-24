@@ -367,7 +367,9 @@ def aggregate_to_hs4(sel):
     rows = []
     for (hs4, hs2n), g in sel.groupby(["hs4_code", "hs2_name"]):
         descs = g.sort_values("global_export_value", ascending=False)["description"].values
-        desc = str(descs[0]) if len(descs) > 0 and descs[0] is not None else ""
+        desc = str(descs[0]) if len(descs) > 0 and descs[0] is not None and str(descs[0]).strip() not in ("", "None", "nan") else ""
+        if not desc:
+            desc = f"{hs2n} ({hs4})"
         r = {
             "hs4_code": hs4, "hs2_name": hs2n, "description": desc,
             "n_products": len(g), "global_export_value": g["global_export_value"].sum(),
