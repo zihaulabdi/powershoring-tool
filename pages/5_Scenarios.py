@@ -314,7 +314,7 @@ with tab_breakdown:
         fig_ab = _make_breakdown_chart(breakdown_df, "attractiveness_score", attr_comp_cols,
                                        attr_labels, attr_comp_weights, GL_PALETTE_EXT[4:9],
                                        "Attractiveness Breakdown")
-            st.plotly_chart(fig_ab, use_container_width=True)
+        st.plotly_chart(fig_ab, use_container_width=True)
 
 
 # --- TAB 3: TREEMAPS ---
