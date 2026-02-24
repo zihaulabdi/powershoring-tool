@@ -344,9 +344,8 @@ def run_scenario_scoring(df, likelihood_weights, feas_weights, attr_weights):
     for k, v in ac.items():
         sel[f"attr_{k}"] = v
 
-    # Composite lenses
+    # Composite score: 60% Feasibility + 40% Attractiveness
     sel["lhf_score"] = 0.60 * sel["feasibility_score"] + 0.40 * sel["attractiveness_score"]
-    sel["sb_score"] = 0.40 * sel["feasibility_score"] + 0.60 * sel["attractiveness_score"]
 
     return sel
 
@@ -368,7 +367,12 @@ def aggregate_to_hs4(sel):
     rows = []
     for (hs4, hs2n), g in sel.groupby(["hs4_code", "hs2_name"]):
         descs = g.sort_values("global_export_value", ascending=False)["description"].values
-        desc = str(descs[0])[:60] if len(descs) > 0 and descs[0] is not None else ""
+        desc = str(descs[0]) if len(descs) > 0 and descs[0] is not None else ""
+        # Truncate at first semicolon for cleaner HS4-level names
+        if ";" in desc:
+            desc = desc.split(";")[0].strip()
+        if len(desc) > 50:
+            desc = desc[:47] + "..."
         r = {
             "hs4_code": hs4, "hs2_name": hs2n, "description": desc,
             "n_products": len(g), "global_export_value": g["global_export_value"].sum(),

@@ -88,10 +88,6 @@ with st.sidebar:
 
     st.divider()
     st.header("Display")
-    lens = st.radio("Ranking lens", ["Low-Hanging Fruit (60F/40A)", "Strategic Bet (40F/60A)"],
-                    key="sc_lens")
-    rank_col = "lhf_score" if "Low-Hanging" in lens else "sb_score"
-    lens_short = "LHF" if "Low-Hanging" in lens else "SB"
 
     top_n = st.slider("Top N per scenario", 10, 50, 30, 5, key="sc_topn")
 
@@ -102,6 +98,9 @@ with st.sidebar:
     send_scenario = st.selectbox("Scenario to send", list(active_scenarios.keys()), key="sc_send")
     if st.button("Save for Comparison"):
         st.session_state["_pending_scenario_send"] = send_scenario
+
+# Fixed ranking: 60% Feasibility + 40% Attractiveness
+rank_col = "lhf_score"
 
 if not active_scenarios:
     st.warning("Select at least one scenario in the sidebar.")
@@ -126,10 +125,10 @@ if st.session_state.get("_pending_scenario_send"):
         if "saved_scenarios" not in st.session_state:
             st.session_state.saved_scenarios = {}
         _res = scenario_results[_sname]
-        st.session_state.saved_scenarios[f"Scenario: {_sname} ({lens_short})"] = {
+        st.session_state.saved_scenarios[f"Scenario: {_sname}"] = {
             "products": _res["selected"].copy(),
             "stage": "scenarios",
-            "desc": f"{_sname} scenario, {lens_short} lens, top {top_n}",
+            "desc": f"{_sname} scenario, 60F/40A, top {top_n}",
         }
         st.success(f"Saved **{_sname}** ({len(_res['selected'])} products) to Comparison.")
 
@@ -137,29 +136,24 @@ if st.session_state.get("_pending_scenario_send"):
 # BUILD CROSS-SCENARIO DATA
 # ============================================================
 n_scenarios = len(active_scenarios)
-lhf_sets = {}
-sb_sets = {}
+top_sets = {}  # sname → set of top N codes
 for sname, res in scenario_results.items():
     df_rank = res["hs4"] if "HS4" in agg_level else res["selected"]
     code_col = "hs4_code" if "HS4" in agg_level else "hs_product_code"
-    lhf_sets[sname] = set(df_rank.nlargest(top_n, "lhf_score")[code_col])
-    sb_sets[sname] = set(df_rank.nlargest(top_n, "sb_score")[code_col])
+    top_sets[sname] = set(df_rank.nlargest(top_n, rank_col)[code_col])
 
 # Count appearances
 all_codes = set()
 code_appearances = {}
 for sname in active_scenarios:
-    for h in lhf_sets[sname] | sb_sets[sname]:
+    for h in top_sets[sname]:
         all_codes.add(h)
         if h not in code_appearances:
-            code_appearances[h] = {"lhf": [], "sb": [], "total": 0}
-        if h in lhf_sets[sname]:
-            code_appearances[h]["lhf"].append(sname)
-        if h in sb_sets[sname]:
-            code_appearances[h]["sb"].append(sname)
+            code_appearances[h] = {"scenarios": [], "total": 0}
+        code_appearances[h]["scenarios"].append(sname)
 
 for h in code_appearances:
-    code_appearances[h]["total"] = len(set(code_appearances[h]["lhf"] + code_appearances[h]["sb"]))
+    code_appearances[h]["total"] = len(code_appearances[h]["scenarios"])
 
 robust_count = sum(1 for v in code_appearances.values() if v["total"] >= 4)
 unique_count = sum(1 for v in code_appearances.values() if v["total"] == 1)
@@ -169,8 +163,7 @@ overlaps = []
 snames = list(active_scenarios.keys())
 for i, s1 in enumerate(snames):
     for s2 in snames[i+1:]:
-        active_set = lhf_sets if "LHF" in lens_short else sb_sets
-        j = len(active_set[s1] & active_set[s2]) / max(len(active_set[s1] | active_set[s2]), 1)
+        j = len(top_sets[s1] & top_sets[s2]) / max(len(top_sets[s1] | top_sets[s2]), 1)
         overlaps.append(j)
 avg_overlap = np.mean(overlaps) * 100 if overlaps else 0
 
@@ -224,29 +217,21 @@ with tab_robust:
             row_z = []
             row_t = []
             for sname in active_scenarios:
-                in_lhf = h in lhf_sets[sname]
-                in_sb = h in sb_sets[sname]
-                if in_lhf and in_sb:
-                    row_z.append(3)
-                    row_t.append("Both")
-                elif in_lhf:
-                    row_z.append(2)
-                    row_t.append("LHF")
-                elif in_sb:
+                if h in top_sets[sname]:
                     row_z.append(1)
-                    row_t.append("SB")
+                    row_t.append("Top N")
                 else:
                     row_z.append(0)
                     row_t.append("")
             z_matrix.append(row_z)
             text_matrix.append(row_t)
 
-        colorscale = [[0.0, "#F5F5F5"], [0.33, "#204B82"], [0.67, "#c22229"], [1.0, "#1a1a2e"]]
+        colorscale = [[0.0, "#F5F5F5"], [1.0, MOROCCO_RED]]
 
         fig_heat = go.Figure(data=go.Heatmap(
             z=z_matrix, x=list(active_scenarios.keys()), y=y_labels,
             text=text_matrix, texttemplate="%{text}", textfont=dict(size=9, color="white"),
-            colorscale=colorscale, zmin=0, zmax=3, showscale=False,
+            colorscale=colorscale, zmin=0, zmax=1, showscale=False,
             hovertemplate="<b>%{y}</b><br>%{x}: %{text}<extra></extra>",
         ))
         fig_heat.update_layout(
@@ -257,7 +242,7 @@ with tab_robust:
             margin=dict(l=350, r=20, t=40, b=40),
         )
         st.plotly_chart(fig_heat, use_container_width=True)
-        st.caption("**Legend:** Dark = Both LHF + SB | Red = LHF only | Blue = SB only | Light = Not in Top N")
+        st.caption("**Legend:** Red = In Top N | Light = Not in Top N")
 
 
 # --- TAB 2: QUADRANTS ---
@@ -328,7 +313,7 @@ with tab_quad:
         qcols[i].metric(q, qc.get(q, 0))
 
     # Score breakdowns
-    st.markdown(f"#### Score Composition — Top 20 by {lens_short}")
+    st.markdown("#### Score Composition — Top 20")
     top20 = hs4_df.nlargest(20, rank_col)
 
     feas_comp_cols = [c for c in ["feas_density", "feas_rca", "feas_hhi", "feas_distance"] if c in top20.columns]
@@ -379,7 +364,7 @@ with tab_quad:
 
 # --- TAB 3: TREEMAPS ---
 with tab_tree:
-    st.markdown(f"**HS2 Chapter composition** of each scenario's Top {top_n} ({lens_short} lens).")
+    st.markdown(f"**HS2 Chapter composition** of each scenario's Top {top_n}.")
 
     # Build unified HS2 color map
     all_hs2_names = sorted(set(
@@ -577,8 +562,7 @@ with tab_data:
             "Description": meta["description"],
             "HS2 Chapter": meta["hs2_name"],
             "Appearances": info["total"],
-            "LHF Scenarios": ", ".join(info["lhf"]) if info["lhf"] else "—",
-            "SB Scenarios": ", ".join(info["sb"]) if info["sb"] else "—",
+            "Scenarios": ", ".join(info["scenarios"]),
             "Avg Feasibility": np.mean(meta["feas"]) if meta["feas"] else 0,
             "Avg Attractiveness": np.mean(meta["attr"]) if meta["attr"] else 0,
             "Trade": meta["trade"],
@@ -599,4 +583,4 @@ with tab_data:
     st.dataframe(display_df, use_container_width=True, height=600)
     st.markdown(f"**{len(cross_df)} unique products** across {n_scenarios} scenarios")
     download_csv(cross_df, "powershoring_cross_scenario.csv",
-                 f"Scenarios: {', '.join(active_scenarios.keys())} | Lens: {lens_short} | Top {top_n}")
+                 f"Scenarios: {', '.join(active_scenarios.keys())} | 60F/40A | Top {top_n}")
