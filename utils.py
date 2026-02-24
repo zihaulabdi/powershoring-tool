@@ -14,6 +14,7 @@ import plotly.io as pio
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(APP_DIR, "data")
 MASTER_DATA = os.path.join(DATA_DIR, "master_product_data.parquet")
+HS4_DESCRIPTIONS = os.path.join(DATA_DIR, "hs4_descriptions.csv")
 
 # ============================================================
 # GROWTH LAB COLOR PALETTE
@@ -350,6 +351,16 @@ def run_scenario_scoring(df, likelihood_weights, feas_weights, attr_weights):
     return sel
 
 
+def _load_hs4_descriptions():
+    """Load HS4 description lookup from CSV."""
+    if os.path.exists(HS4_DESCRIPTIONS):
+        hs4_df = pd.read_csv(HS4_DESCRIPTIONS, dtype=str)
+        return dict(zip(hs4_df["hs4_code"], hs4_df["hs4_description"]))
+    return {}
+
+_HS4_DESC_LOOKUP = _load_hs4_descriptions()
+
+
 def aggregate_to_hs4(sel):
     """Aggregate scored HS6 products to HS4 level using trade-weighted averages.
 
@@ -366,8 +377,7 @@ def aggregate_to_hs4(sel):
 
     rows = []
     for (hs4, hs2n), g in sel.groupby(["hs4_code", "hs2_name"]):
-        descs = g.sort_values("global_export_value", ascending=False)["description"].values
-        desc = str(descs[0]) if len(descs) > 0 and descs[0] is not None and str(descs[0]).strip() not in ("", "None", "nan") else ""
+        desc = _HS4_DESC_LOOKUP.get(hs4, "")
         if not desc:
             desc = f"{hs2n} ({hs4})"
         r = {
