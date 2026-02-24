@@ -251,7 +251,6 @@ with tab_robust:
                 z=z_matrix_hs2, x=list(active_scenarios.keys()), y=y_labels_hs2,
                 colorscale=[[0.0, "#F5F5F5"], [0.01, "#fde0e0"], [0.5, "#e67478"], [1.0, MOROCCO_RED]],
                 zmin=0, zmax=z_max, showscale=True,
-                colorbar=dict(title="# Products", titlefont=dict(size=12)),
                 text=[[str(v) if v > 0 else "" for v in row] for row in z_matrix_hs2],
                 texttemplate="%{text}",
                 textfont=dict(size=14, color="white"),
