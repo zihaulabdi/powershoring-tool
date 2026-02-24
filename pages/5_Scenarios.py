@@ -57,6 +57,13 @@ with st.sidebar:
             active_scenarios[sname] = sdef
 
     st.divider()
+    st.header("Feasibility vs Attractiveness")
+    feas_pct = st.slider("Feasibility weight (%)", 0, 100, 60, 5, key="sc_fa_balance",
+                         help="Remaining weight goes to attractiveness")
+    attr_pct = 100 - feas_pct
+    st.caption(f"**{feas_pct}% Feasibility / {attr_pct}% Attractiveness**")
+
+    st.divider()
     st.header("Feasibility Weights")
     fw_density = st.slider("Product Space Proximity (Density)", 0, 100, 50, key="sc_fw_d")
     fw_rca = st.slider("Existing Capability (RCA)", 0, 100, 20, key="sc_fw_r")
@@ -99,8 +106,7 @@ with st.sidebar:
     if st.button("Save for Comparison"):
         st.session_state["_pending_scenario_send"] = send_scenario
 
-# Fixed ranking: 60% Feasibility + 40% Attractiveness
-rank_col = "lhf_score"
+rank_col = "composite_score"
 
 if not active_scenarios:
     st.warning("Select at least one scenario in the sidebar.")
@@ -115,6 +121,8 @@ for sname, sdef in active_scenarios.items():
     if sdef.get("pre_filter") == "cbam":
         input_df = filtered[filtered["cbam_flag"] == 1].copy()
     sel = run_scenario_scoring(input_df, sdef["weights"], feas_w, attr_w)
+    # Compute composite with user's slider balance
+    sel["composite_score"] = (feas_pct / 100) * sel["feasibility_score"] + (attr_pct / 100) * sel["attractiveness_score"]
     hs4 = aggregate_to_hs4(sel)
     scenario_results[sname] = {"selected": sel, "hs4": hs4}
 
@@ -128,7 +136,7 @@ if st.session_state.get("_pending_scenario_send"):
         st.session_state.saved_scenarios[f"Scenario: {_sname}"] = {
             "products": _res["selected"].copy(),
             "stage": "scenarios",
-            "desc": f"{_sname} scenario, 60F/40A, top {top_n}",
+            "desc": f"{_sname} scenario, {feas_pct}F/{attr_pct}A, top {top_n}",
         }
         st.success(f"Saved **{_sname}** ({len(_res['selected'])} products) to Comparison.")
 
@@ -171,7 +179,7 @@ avg_overlap = np.mean(overlaps) * 100 if overlaps else 0
 # KPI ROW
 # ============================================================
 st.markdown(f"*Using {len(filtered):,} products from {filter_source}. "
-            f"Running {n_scenarios} scenarios.*")
+            f"Running {n_scenarios} scenarios. Ranking: {feas_pct}% F / {attr_pct}% A.*")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Unique Products", f"{len(all_codes):,}")
@@ -211,28 +219,19 @@ with tab_robust:
 
         y_labels = [f"HS {h} — {desc_lookup.get(h, '')[:50]}" for h in robust_codes]
         z_matrix = []
-        text_matrix = []
 
         for h in robust_codes:
             row_z = []
-            row_t = []
             for sname in active_scenarios:
-                if h in top_sets[sname]:
-                    row_z.append(1)
-                    row_t.append("Top N")
-                else:
-                    row_z.append(0)
-                    row_t.append("")
+                row_z.append(1 if h in top_sets[sname] else 0)
             z_matrix.append(row_z)
-            text_matrix.append(row_t)
 
         colorscale = [[0.0, "#F5F5F5"], [1.0, MOROCCO_RED]]
 
         fig_heat = go.Figure(data=go.Heatmap(
             z=z_matrix, x=list(active_scenarios.keys()), y=y_labels,
-            text=text_matrix, texttemplate="%{text}", textfont=dict(size=9, color="white"),
             colorscale=colorscale, zmin=0, zmax=1, showscale=False,
-            hovertemplate="<b>%{y}</b><br>%{x}: %{text}<extra></extra>",
+            hovertemplate="<b>%{y}</b><br>%{x}<extra></extra>",
         ))
         fig_heat.update_layout(
             template=GL_TEMPLATE,
@@ -242,7 +241,6 @@ with tab_robust:
             margin=dict(l=350, r=20, t=40, b=40),
         )
         st.plotly_chart(fig_heat, use_container_width=True)
-        st.caption("**Legend:** Red = In Top N | Light = Not in Top N")
 
 
 # --- TAB 2: BREAKDOWN ---
@@ -254,103 +252,62 @@ with tab_breakdown:
 
     hs4_df = hs4_df.copy()
 
-    # Color by Top N
-    top_n_codes = set(hs4_df.nlargest(top_n, rank_col)[code_col])
-    hs4_df["_is_top"] = hs4_df[code_col].isin(top_n_codes)
-
-    trade_col = "global_export_value"
-    hs4_df["_size"] = np.sqrt(hs4_df[trade_col].clip(lower=1) / 1e8).clip(4, 40)
-
-    # Scatter: grey for others, red for Top N (others first so red on top)
-    fig_q = go.Figure()
-    others = hs4_df[~hs4_df["_is_top"]]
-    top = hs4_df[hs4_df["_is_top"]]
-
-    fig_q.add_trace(go.Scatter(
-        x=others["feasibility_score"], y=others["attractiveness_score"],
-        mode="markers", name="Other",
-        marker=dict(size=others["_size"], color=GREY, opacity=0.4,
-                    line=dict(width=0.5, color="white")),
-        text=others.apply(lambda r: f"HS {r[code_col]} — {str(r.get('description', ''))}<br>"
-                          f"F={r['feasibility_score']:.0f} A={r['attractiveness_score']:.0f}<br>"
-                          f"Trade: {format_dollars(r[trade_col])}", axis=1),
-        hoverinfo="text",
-    ))
-    fig_q.add_trace(go.Scatter(
-        x=top["feasibility_score"], y=top["attractiveness_score"],
-        mode="markers", name=f"Top {top_n}",
-        marker=dict(size=top["_size"], color=MOROCCO_RED, opacity=0.7,
-                    line=dict(width=0.5, color="white")),
-        text=top.apply(lambda r: f"HS {r[code_col]} — {str(r.get('description', ''))}<br>"
-                       f"F={r['feasibility_score']:.0f} A={r['attractiveness_score']:.0f}<br>"
-                       f"Trade: {format_dollars(r[trade_col])}", axis=1),
-        hoverinfo="text",
-    ))
-
-    fig_q.update_layout(
-        template=GL_TEMPLATE,
-        title=dict(text=f"{focus_scenario} — Feasibility vs Attractiveness", font=dict(color=MOROCCO_RED)),
-        xaxis_title="Feasibility Score", yaxis_title="Attractiveness Score",
-        height=600, showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=-0.15, font=dict(size=11)),
-    )
-    st.plotly_chart(fig_q, use_container_width=True)
-
-    # Score breakdowns — all products appearing in at least 1 scenario, ranked by score
-    st.markdown("#### Score Composition — All Top N Products (ranked by composite score)")
-
     # Gather all codes that appear in at least one scenario
     all_scenario_codes = set()
     for s_codes in top_sets.values():
         all_scenario_codes |= s_codes
 
-    # Filter current scenario's data to those codes
+    # Filter to products appearing in at least one scenario's Top N
     breakdown_df = hs4_df[hs4_df[code_col].isin(all_scenario_codes)].copy()
-    breakdown_df = breakdown_df.sort_values(rank_col, ascending=False)
 
     feas_comp_cols = [c for c in ["feas_density", "feas_rca", "feas_hhi", "feas_distance"] if c in breakdown_df.columns]
     attr_comp_cols = [c for c in ["attr_pci", "attr_cog", "attr_market_size", "attr_growth", "attr_spillover"] if c in breakdown_df.columns]
 
+    def _make_breakdown_chart(df, sort_col, comp_cols, comp_labels, palette, title):
+        """Build a stacked horizontal bar chart ranked by sort_col."""
+        ranked = df.sort_values(sort_col, ascending=False)
+        bar_data = []
+        for _, row in ranked.iterrows():
+            lbl = f"HS {row[code_col]} — {str(row.get('description', ''))[:40]}"
+            for c in comp_cols:
+                bar_data.append({"product": lbl, "component": comp_labels.get(c, c), "value": row.get(c, 0)})
+        bdf = pd.DataFrame(bar_data)
+        product_order = ranked.sort_values(sort_col, ascending=True).apply(
+            lambda r: f"HS {r[code_col]} — {str(r.get('description', ''))[:40]}", axis=1).tolist()
+        fig = px.bar(bdf, x="value", y="product", color="component", orientation="h",
+                     color_discrete_sequence=palette, title=title,
+                     category_orders={"product": product_order})
+        fig.update_layout(template=GL_TEMPLATE, height=max(400, len(ranked) * 18),
+                          xaxis_title="Percentile Score", yaxis_title="",
+                          margin=dict(l=300), legend=dict(orientation="h", y=-0.1))
+        return fig
+
+    feas_labels = {"feas_density": "Density", "feas_rca": "RCA", "feas_hhi": "HHI", "feas_distance": "Distance"}
+    attr_labels = {"attr_pci": "PCI", "attr_cog": "COG", "attr_market_size": "Mkt Size",
+                   "attr_growth": "Growth", "attr_spillover": "Spillover"}
+
+    # 3 panels
+    st.markdown(f"#### Ranked by Composite Score ({feas_pct}F/{attr_pct}A)")
+    all_comp_cols = feas_comp_cols + attr_comp_cols
+    all_comp_labels = {**feas_labels, **attr_labels}
+    all_palette = GL_PALETTE_EXT[:len(all_comp_cols)]
+    fig_comp = _make_breakdown_chart(breakdown_df, rank_col, all_comp_cols, all_comp_labels,
+                                     all_palette, f"Composite Score ({feas_pct}F/{attr_pct}A)")
+    st.plotly_chart(fig_comp, use_container_width=True)
+
     col_l, col_r = st.columns(2)
     with col_l:
+        st.markdown("#### Ranked by Feasibility")
         if feas_comp_cols:
-            labels = {"feas_density": "Density", "feas_rca": "RCA", "feas_hhi": "HHI", "feas_distance": "Distance"}
-            bar_data = []
-            for _, row in breakdown_df.iterrows():
-                lbl = f"HS {row[code_col]}"
-                for c in feas_comp_cols:
-                    bar_data.append({"product": lbl, "component": labels.get(c, c), "value": row.get(c, 0)})
-            bdf = pd.DataFrame(bar_data)
-            product_order = breakdown_df.sort_values(rank_col, ascending=True).apply(
-                lambda r: f"HS {r[code_col]}", axis=1).tolist()
-            fig_fb = px.bar(bdf, x="value", y="product", color="component", orientation="h",
-                            color_discrete_sequence=GL_PALETTE_EXT[:4],
-                            title="Feasibility Breakdown",
-                            category_orders={"product": product_order})
-            fig_fb.update_layout(template=GL_TEMPLATE, height=max(400, len(breakdown_df) * 20),
-                                 xaxis_title="Percentile Score", yaxis_title="",
-                                 margin=dict(l=100), legend=dict(orientation="h", y=-0.15))
+            fig_fb = _make_breakdown_chart(breakdown_df, "feasibility_score", feas_comp_cols,
+                                           feas_labels, GL_PALETTE_EXT[:4], "Feasibility Breakdown")
             st.plotly_chart(fig_fb, use_container_width=True)
 
     with col_r:
+        st.markdown("#### Ranked by Attractiveness")
         if attr_comp_cols:
-            labels = {"attr_pci": "PCI", "attr_cog": "COG", "attr_market_size": "Mkt Size",
-                      "attr_growth": "Growth", "attr_spillover": "Spillover"}
-            bar_data = []
-            for _, row in breakdown_df.iterrows():
-                lbl = f"HS {row[code_col]}"
-                for c in attr_comp_cols:
-                    bar_data.append({"product": lbl, "component": labels.get(c, c), "value": row.get(c, 0)})
-            bdf = pd.DataFrame(bar_data)
-            product_order = breakdown_df.sort_values(rank_col, ascending=True).apply(
-                lambda r: f"HS {r[code_col]}", axis=1).tolist()
-            fig_ab = px.bar(bdf, x="value", y="product", color="component", orientation="h",
-                            color_discrete_sequence=GL_PALETTE_EXT[4:9],
-                            title="Attractiveness Breakdown",
-                            category_orders={"product": product_order})
-            fig_ab.update_layout(template=GL_TEMPLATE, height=max(400, len(breakdown_df) * 20),
-                                 xaxis_title="Percentile Score", yaxis_title="",
-                                 margin=dict(l=100), legend=dict(orientation="h", y=-0.15))
+            fig_ab = _make_breakdown_chart(breakdown_df, "attractiveness_score", attr_comp_cols,
+                                           attr_labels, GL_PALETTE_EXT[4:9], "Attractiveness Breakdown")
             st.plotly_chart(fig_ab, use_container_width=True)
 
 
@@ -358,13 +315,11 @@ with tab_breakdown:
 with tab_tree:
     st.markdown(f"**HS2 Chapter composition** of each scenario's Top {top_n}.")
 
-    # Build unified HS2 color map from ALL scenarios' full pools (not just Top N)
-    # to ensure consistent and unique colors
+    # Build unified HS2 color map from ALL scenarios' full pools
     all_hs2_names = sorted(set(
         nm for res in scenario_results.values()
         for nm in res["hs4"]["hs2_name"].dropna().unique()
     ))
-    # Use a wide palette to maximize color distinctiveness
     _extended_palette = (
         GL_PALETTE_EXT
         + ["#264653", "#E9C46A", "#F4A261", "#2A9D8F", "#E63946",
@@ -415,7 +370,6 @@ with tab_data:
 
     cross_rows = []
     for h, info in code_appearances.items():
-        # Collect all scores from all scenarios that have this product
         meta = {
             "description": "", "hs2_name": "", "trade": 0,
             "feas": [], "attr": [], "composite": [], "likelihood": [],
@@ -435,7 +389,7 @@ with tab_data:
                 meta["trade"] = max(meta["trade"], r.get("global_export_value", 0))
                 meta["feas"].append(r.get("feasibility_score", 0))
                 meta["attr"].append(r.get("attractiveness_score", 0))
-                meta["composite"].append(r.get("lhf_score", 0))
+                meta["composite"].append(r.get("composite_score", 0))
                 meta["likelihood"].append(r.get("likelihood_score", 0))
                 for k in ["feas_rca", "feas_density", "feas_hhi", "feas_distance",
                           "attr_pci", "attr_cog", "attr_market_size", "attr_growth", "attr_spillover"]:
@@ -453,7 +407,7 @@ with tab_data:
             "HS2 Chapter": meta["hs2_name"],
             "Appearances": info["total"],
             "Scenarios": ", ".join(info["scenarios"]),
-            "Composite (60F/40A)": round(_avg(meta["composite"]), 1),
+            f"Composite ({feas_pct}F/{attr_pct}A)": round(_avg(meta["composite"]), 1),
             "Feasibility": round(_avg(meta["feas"]), 1),
             "Attractiveness": round(_avg(meta["attr"]), 1),
             "Likelihood": round(_avg(meta["likelihood"]), 1),
@@ -475,7 +429,7 @@ with tab_data:
         })
 
     cross_df = pd.DataFrame(cross_rows).sort_values(
-        ["Appearances", "Composite (60F/40A)"], ascending=[False, False]
+        ["Appearances", f"Composite ({feas_pct}F/{attr_pct}A)"], ascending=[False, False]
     ).reset_index(drop=True)
     cross_df.index = cross_df.index + 1
     cross_df.index.name = "Rank"
@@ -483,4 +437,4 @@ with tab_data:
     st.dataframe(cross_df, use_container_width=True, height=600)
     st.markdown(f"**{len(cross_df)} unique products** across {n_scenarios} scenarios")
     download_csv(cross_df, "powershoring_cross_scenario.csv",
-                 f"Scenarios: {', '.join(active_scenarios.keys())} | 60F/40A | Top {top_n}")
+                 f"Scenarios: {', '.join(active_scenarios.keys())} | {feas_pct}F/{attr_pct}A | Top {top_n}")
