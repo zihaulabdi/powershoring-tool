@@ -275,11 +275,11 @@ with tab_breakdown:
         product_order = ranked.sort_values(sort_col, ascending=True).apply(
             lambda r: f"HS {r[code_col]} — {str(r.get('description', ''))[:40]}", axis=1).tolist()
         fig = px.bar(bdf, x="value", y="product", color="component", orientation="h",
-                     color_discrete_sequence=palette, title=title,
-                     category_orders={"product": product_order})
+                     color_discrete_sequence=palette, title=title)
         fig.update_layout(template=GL_TEMPLATE, height=max(400, len(ranked) * 18),
                           xaxis_title="Percentile Score", yaxis_title="",
                           margin=dict(l=300), legend=dict(orientation="h", y=-0.1))
+        fig.update_yaxes(categoryorder="array", categoryarray=product_order)
         return fig
 
     feas_labels = {"feas_density": "Density", "feas_rca": "RCA", "feas_hhi": "HHI", "feas_distance": "Distance"}
