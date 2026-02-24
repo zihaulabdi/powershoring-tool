@@ -264,21 +264,25 @@ with tab_breakdown:
     attr_comp_cols = [c for c in ["attr_pci", "attr_cog", "attr_market_size", "attr_growth", "attr_spillover"] if c in breakdown_df.columns]
 
     def _make_breakdown_chart(df, sort_col, comp_cols, comp_labels, palette, title):
-        """Build a stacked horizontal bar chart ranked by sort_col."""
+        """Build a normalized 100% stacked horizontal bar chart ranked by sort_col."""
         ranked = df.sort_values(sort_col, ascending=False)
         bar_data = []
         for _, row in ranked.iterrows():
             lbl = f"HS {row[code_col]} — {str(row.get('description', ''))[:40]}"
+            raw_vals = {c: max(row.get(c, 0), 0) for c in comp_cols}
+            total = sum(raw_vals.values())
             for c in comp_cols:
-                bar_data.append({"product": lbl, "component": comp_labels.get(c, c), "value": row.get(c, 0)})
+                pct = (raw_vals[c] / total * 100) if total > 0 else 0
+                bar_data.append({"product": lbl, "component": comp_labels.get(c, c), "value": pct})
         bdf = pd.DataFrame(bar_data)
         product_order = ranked.sort_values(sort_col, ascending=True).apply(
             lambda r: f"HS {r[code_col]} — {str(r.get('description', ''))[:40]}", axis=1).tolist()
         fig = px.bar(bdf, x="value", y="product", color="component", orientation="h",
                      color_discrete_sequence=palette, title=title)
         fig.update_layout(template=GL_TEMPLATE, height=max(400, len(ranked) * 18),
-                          xaxis_title="Percentile Score", yaxis_title="",
-                          margin=dict(l=300), legend=dict(orientation="h", y=-0.1))
+                          xaxis_title="Weighted Contribution (%)", yaxis_title="",
+                          margin=dict(l=300), legend=dict(orientation="h", y=-0.1),
+                          xaxis=dict(range=[0, 100]))
         fig.update_yaxes(categoryorder="array", categoryarray=product_order)
         return fig
 
