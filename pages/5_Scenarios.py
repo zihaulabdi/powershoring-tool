@@ -198,49 +198,140 @@ tab_robust, tab_breakdown, tab_tree, tab_data = st.tabs(
 with tab_robust:
     st.markdown(f"**Which products appear across scenarios?** Showing products in 2+ scenario Top {top_n}s.")
 
-    # Filter to 2+ appearances, build matrix
-    robust_codes = sorted(
-        [h for h, v in code_appearances.items() if v["total"] >= 2],
-        key=lambda h: -code_appearances[h]["total"]
+    robust_view = st.radio(
+        "View level:", ["Product level", "HS2 Chapter level"],
+        horizontal=True, key="robust_view_level",
     )
 
-    if not robust_codes:
-        st.info("No products appear in 2+ scenarios. Try increasing Top N.")
-    else:
-        # Get descriptions
-        desc_lookup = {}
-        for sname, res in scenario_results.items():
-            src = res["hs4"] if "HS4" in agg_level else res["selected"]
-            code_col = "hs4_code" if "HS4" in agg_level else "hs_product_code"
-            for _, row in src.iterrows():
-                c = str(row[code_col])
-                if c not in desc_lookup:
-                    desc_lookup[c] = str(row.get("description", ""))
+    if robust_view == "HS2 Chapter level":
+        # ── HS2-level robustness heatmap ──
+        # For each scenario, get the set of HS2 chapters represented in its Top N
+        hs2_scenario_counts = {}  # hs2_name → {scenario → count of products}
+        hs2_total_appearances = {}  # hs2_name → number of scenarios it appears in
+        for sname in active_scenarios:
+            df_rank = scenario_results[sname]["hs4"] if "HS4" in agg_level else scenario_results[sname]["selected"]
+            top_df = df_rank.nlargest(top_n, rank_col)
+            if "HS4" in agg_level:
+                top_df = top_df.copy()
+                top_df["hs2_code"] = top_df["hs4_code"].str[:2]
+            for hs2n in top_df["hs2_name"].dropna().unique():
+                if hs2n not in hs2_scenario_counts:
+                    hs2_scenario_counts[hs2n] = {}
+                n_prods = len(top_df[top_df["hs2_name"] == hs2n])
+                hs2_scenario_counts[hs2n][sname] = n_prods
 
-        y_labels = [f"HS {h} — {desc_lookup.get(h, '')[:50]}" for h in robust_codes]
-        z_matrix = []
+        for hs2n, scens in hs2_scenario_counts.items():
+            hs2_total_appearances[hs2n] = len(scens)
 
-        for h in robust_codes:
-            row_z = []
-            for sname in active_scenarios:
-                row_z.append(1 if h in top_sets[sname] else 0)
-            z_matrix.append(row_z)
-
-        colorscale = [[0.0, "#F5F5F5"], [1.0, MOROCCO_RED]]
-
-        fig_heat = go.Figure(data=go.Heatmap(
-            z=z_matrix, x=list(active_scenarios.keys()), y=y_labels,
-            colorscale=colorscale, zmin=0, zmax=1, showscale=False,
-            hovertemplate="<b>%{y}</b><br>%{x}<extra></extra>",
-        ))
-        fig_heat.update_layout(
-            template=GL_TEMPLATE,
-            height=max(500, len(robust_codes) * 22),
-            xaxis=dict(side="top", tickangle=0),
-            yaxis=dict(autorange="reversed", tickfont=dict(size=9)),
-            margin=dict(l=350, r=20, t=40, b=40),
+        # Filter to 2+ scenario appearances and sort
+        robust_hs2 = sorted(
+            [h for h, t in hs2_total_appearances.items() if t >= 2],
+            key=lambda h: (-hs2_total_appearances[h], h)
         )
-        st.plotly_chart(fig_heat, use_container_width=True)
+
+        if not robust_hs2:
+            st.info("No HS2 chapters appear in 2+ scenarios. Try increasing Top N.")
+        else:
+            y_labels_hs2 = robust_hs2
+            z_matrix_hs2 = []
+            hover_text_hs2 = []
+            for hs2n in robust_hs2:
+                row_z = []
+                row_hover = []
+                for sname in active_scenarios:
+                    cnt = hs2_scenario_counts.get(hs2n, {}).get(sname, 0)
+                    row_z.append(cnt)
+                    row_hover.append(f"<b>{hs2n}</b><br>{sname}: {cnt} products")
+                z_matrix_hs2.append(row_z)
+                hover_text_hs2.append(row_hover)
+
+            z_max = max(max(row) for row in z_matrix_hs2) if z_matrix_hs2 else 1
+
+            fig_heat_hs2 = go.Figure(data=go.Heatmap(
+                z=z_matrix_hs2, x=list(active_scenarios.keys()), y=y_labels_hs2,
+                colorscale=[[0.0, "#F5F5F5"], [0.01, "#fde0e0"], [0.5, "#e67478"], [1.0, MOROCCO_RED]],
+                zmin=0, zmax=z_max, showscale=True,
+                colorbar=dict(title="# Products", titlefont=dict(size=12)),
+                text=[[str(v) if v > 0 else "" for v in row] for row in z_matrix_hs2],
+                texttemplate="%{text}",
+                textfont=dict(size=14, color="white"),
+                hovertext=hover_text_hs2,
+                hovertemplate="%{hovertext}<extra></extra>",
+            ))
+            # Add appearance count annotation on the right
+            for i, hs2n in enumerate(robust_hs2):
+                n_app = hs2_total_appearances[hs2n]
+                fig_heat_hs2.add_annotation(
+                    x=len(active_scenarios) - 0.3, y=i,
+                    text=f"<b>{n_app}</b>", showarrow=False,
+                    font=dict(size=13, color=MOROCCO_RED),
+                    xanchor="left",
+                )
+
+            fig_heat_hs2.update_layout(
+                template=GL_TEMPLATE,
+                height=max(450, len(robust_hs2) * 35),
+                xaxis=dict(side="top", tickangle=0, tickfont=dict(size=13)),
+                yaxis=dict(autorange="reversed", tickfont=dict(size=13), dtick=1),
+                margin=dict(l=350, r=60, t=50, b=30),
+            )
+            st.plotly_chart(fig_heat_hs2, use_container_width=True)
+            st.caption("Cell values = number of products from that HS2 chapter in each scenario's Top N. "
+                       "Numbers on right = total scenarios the chapter appears in.")
+
+    else:
+        # ── Product-level robustness heatmap ──
+        robust_codes = sorted(
+            [h for h, v in code_appearances.items() if v["total"] >= 2],
+            key=lambda h: -code_appearances[h]["total"]
+        )
+
+        if not robust_codes:
+            st.info("No products appear in 2+ scenarios. Try increasing Top N.")
+        else:
+            # Get descriptions
+            desc_lookup = {}
+            for sname, res in scenario_results.items():
+                src = res["hs4"] if "HS4" in agg_level else res["selected"]
+                _code_col = "hs4_code" if "HS4" in agg_level else "hs_product_code"
+                for _, row in src.iterrows():
+                    c = str(row[_code_col])
+                    if c not in desc_lookup:
+                        desc_lookup[c] = str(row.get("description", ""))
+
+            # Build labels with appearance count
+            y_labels = []
+            for h in robust_codes:
+                desc = desc_lookup.get(h, "")
+                if len(desc) > 45:
+                    desc = desc[:43] + ".."
+                n_app = code_appearances[h]["total"]
+                y_labels.append(f"({n_app}) HS {h} — {desc}")
+
+            z_matrix = []
+            for h in robust_codes:
+                row_z = []
+                for sname in active_scenarios:
+                    row_z.append(1 if h in top_sets[sname] else 0)
+                z_matrix.append(row_z)
+
+            colorscale = [[0.0, "#F5F5F5"], [1.0, MOROCCO_RED]]
+
+            fig_heat = go.Figure(data=go.Heatmap(
+                z=z_matrix, x=list(active_scenarios.keys()), y=y_labels,
+                colorscale=colorscale, zmin=0, zmax=1, showscale=False,
+                hovertemplate="<b>%{y}</b><br>%{x}<extra></extra>",
+            ))
+            fig_heat.update_layout(
+                template=GL_TEMPLATE,
+                height=max(500, len(robust_codes) * 28),
+                xaxis=dict(side="top", tickangle=0, tickfont=dict(size=13)),
+                yaxis=dict(autorange="reversed", tickfont=dict(size=12), dtick=1),
+                margin=dict(l=420, r=20, t=50, b=30),
+            )
+            st.plotly_chart(fig_heat, use_container_width=True)
+            st.caption(f"Number in parentheses = scenarios the product appears in. "
+                       f"Red = in Top {top_n}, grey = not.")
 
 
 # --- TAB 2: BREAKDOWN ---
