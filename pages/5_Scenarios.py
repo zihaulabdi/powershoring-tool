@@ -250,15 +250,8 @@ with tab_breakdown:
     hs4_df = res["hs4"] if "HS4" in agg_level else res["selected"]
     code_col = "hs4_code" if "HS4" in agg_level else "hs_product_code"
 
-    hs4_df = hs4_df.copy()
-
-    # Gather all codes that appear in at least one scenario
-    all_scenario_codes = set()
-    for s_codes in top_sets.values():
-        all_scenario_codes |= s_codes
-
-    # Filter to products appearing in at least one scenario's Top N
-    breakdown_df = hs4_df[hs4_df[code_col].isin(all_scenario_codes)].copy()
+    # Top N from the focused scenario
+    breakdown_df = hs4_df.nlargest(top_n, rank_col).copy()
 
     feas_comp_cols = [c for c in ["feas_density", "feas_rca", "feas_hhi", "feas_distance"] if c in breakdown_df.columns]
     attr_comp_cols = [c for c in ["attr_pci", "attr_cog", "attr_market_size", "attr_growth", "attr_spillover"] if c in breakdown_df.columns]
