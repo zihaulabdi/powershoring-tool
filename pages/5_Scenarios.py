@@ -95,7 +95,7 @@ with st.sidebar:
 
     st.divider()
     st.header("Send to Comparison")
-    send_scenario = st.selectbox("Scenario to send", list(active_scenarios.keys()), key="sc_send")
+    send_scenario = st.selectbox("Scenario to send", list(active_scenarios.keys()) or ["—"], key="sc_send")
     if st.button("Save for Comparison"):
         st.session_state["_pending_scenario_send"] = send_scenario
 
@@ -182,8 +182,8 @@ c4.metric("Avg Pairwise Overlap", f"{avg_overlap:.0f}%")
 # ============================================================
 # TABS
 # ============================================================
-tab_robust, tab_quad, tab_tree, tab_ocp, tab_data = st.tabs(
-    ["Robustness", "Quadrants", "Treemaps", "OCP Lens", "Data Table"]
+tab_robust, tab_breakdown, tab_tree, tab_data = st.tabs(
+    ["Robustness", "Breakdown", "Treemaps", "Data Table"]
 )
 
 # --- TAB 1: ROBUSTNESS HEATMAP ---
@@ -207,9 +207,9 @@ with tab_robust:
             for _, row in src.iterrows():
                 c = str(row[code_col])
                 if c not in desc_lookup:
-                    desc_lookup[c] = str(row.get("description", ""))[:40]
+                    desc_lookup[c] = str(row.get("description", ""))
 
-        y_labels = [f"HS {h} — {desc_lookup.get(h, '')}" for h in robust_codes]
+        y_labels = [f"HS {h} — {desc_lookup.get(h, '')[:50]}" for h in robust_codes]
         z_matrix = []
         text_matrix = []
 
@@ -245,77 +245,89 @@ with tab_robust:
         st.caption("**Legend:** Red = In Top N | Light = Not in Top N")
 
 
-# --- TAB 2: QUADRANTS ---
-with tab_quad:
-    focus_scenario = st.selectbox("Focus on scenario:", list(active_scenarios.keys()), key="sc_quad_focus")
+# --- TAB 2: BREAKDOWN ---
+with tab_breakdown:
+    focus_scenario = st.selectbox("Focus on scenario:", list(active_scenarios.keys()), key="sc_breakdown_focus")
     res = scenario_results[focus_scenario]
     hs4_df = res["hs4"] if "HS4" in agg_level else res["selected"]
     code_col = "hs4_code" if "HS4" in agg_level else "hs_product_code"
 
-    f_med = hs4_df["feasibility_score"].median()
-    a_med = hs4_df["attractiveness_score"].median()
-
     hs4_df = hs4_df.copy()
 
-    # Top 10 to label by composite score
-    top10_idx = hs4_df.nlargest(10, rank_col).index
+    # Color by Top N
+    top_n_codes = set(hs4_df.nlargest(top_n, rank_col)[code_col])
+    hs4_df["_is_top"] = hs4_df[code_col].isin(top_n_codes)
 
     trade_col = "global_export_value"
     hs4_df["_size"] = np.sqrt(hs4_df[trade_col].clip(lower=1) / 1e8).clip(4, 40)
 
+    # Scatter: grey for others, red for Top N (others first so red on top)
     fig_q = go.Figure()
+    others = hs4_df[~hs4_df["_is_top"]]
+    top = hs4_df[hs4_df["_is_top"]]
+
     fig_q.add_trace(go.Scatter(
-        x=hs4_df["feasibility_score"], y=hs4_df["attractiveness_score"],
-        mode="markers", name="Products",
-        marker=dict(size=hs4_df["_size"], color=MOROCCO_RED, opacity=0.55,
+        x=others["feasibility_score"], y=others["attractiveness_score"],
+        mode="markers", name="Other",
+        marker=dict(size=others["_size"], color=GREY, opacity=0.4,
                     line=dict(width=0.5, color="white")),
-        text=hs4_df.apply(lambda r: f"HS {r[code_col]} — {str(r.get('description', ''))[:30]}<br>"
+        text=others.apply(lambda r: f"HS {r[code_col]} — {str(r.get('description', ''))}<br>"
                           f"F={r['feasibility_score']:.0f} A={r['attractiveness_score']:.0f}<br>"
                           f"Trade: {format_dollars(r[trade_col])}", axis=1),
         hoverinfo="text",
     ))
-
-    # Label top 10
-    for idx in top10_idx:
-        row = hs4_df.loc[idx]
-        fig_q.add_annotation(
-            x=row["feasibility_score"], y=row["attractiveness_score"],
-            text=f"HS {row[code_col]} — {str(row.get('description', ''))[:25]}",
-            showarrow=True, arrowhead=0, arrowwidth=0.8,
-            font=dict(size=8, color="#333"), ax=20, ay=-15,
-        )
+    fig_q.add_trace(go.Scatter(
+        x=top["feasibility_score"], y=top["attractiveness_score"],
+        mode="markers", name=f"Top {top_n}",
+        marker=dict(size=top["_size"], color=MOROCCO_RED, opacity=0.7,
+                    line=dict(width=0.5, color="white")),
+        text=top.apply(lambda r: f"HS {r[code_col]} — {str(r.get('description', ''))}<br>"
+                       f"F={r['feasibility_score']:.0f} A={r['attractiveness_score']:.0f}<br>"
+                       f"Trade: {format_dollars(r[trade_col])}", axis=1),
+        hoverinfo="text",
+    ))
 
     fig_q.update_layout(
         template=GL_TEMPLATE,
         title=dict(text=f"{focus_scenario} — Feasibility vs Attractiveness", font=dict(color=MOROCCO_RED)),
         xaxis_title="Feasibility Score", yaxis_title="Attractiveness Score",
-        height=600, showlegend=False,
+        height=600, showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=-0.15, font=dict(size=11)),
     )
+    st.plotly_chart(fig_q, use_container_width=True)
 
-    # Score breakdowns
-    st.markdown("#### Score Composition — Top 20")
-    top20 = hs4_df.nlargest(20, rank_col)
+    # Score breakdowns — all products appearing in at least 1 scenario, ranked by score
+    st.markdown("#### Score Composition — All Top N Products (ranked by composite score)")
 
-    feas_comp_cols = [c for c in ["feas_density", "feas_rca", "feas_hhi", "feas_distance"] if c in top20.columns]
-    attr_comp_cols = [c for c in ["attr_pci", "attr_cog", "attr_market_size", "attr_growth", "attr_spillover"] if c in top20.columns]
+    # Gather all codes that appear in at least one scenario
+    all_scenario_codes = set()
+    for s_codes in top_sets.values():
+        all_scenario_codes |= s_codes
+
+    # Filter current scenario's data to those codes
+    breakdown_df = hs4_df[hs4_df[code_col].isin(all_scenario_codes)].copy()
+    breakdown_df = breakdown_df.sort_values(rank_col, ascending=False)
+
+    feas_comp_cols = [c for c in ["feas_density", "feas_rca", "feas_hhi", "feas_distance"] if c in breakdown_df.columns]
+    attr_comp_cols = [c for c in ["attr_pci", "attr_cog", "attr_market_size", "attr_growth", "attr_spillover"] if c in breakdown_df.columns]
 
     col_l, col_r = st.columns(2)
     with col_l:
         if feas_comp_cols:
             labels = {"feas_density": "Density", "feas_rca": "RCA", "feas_hhi": "HHI", "feas_distance": "Distance"}
             bar_data = []
-            for _, row in top20.iterrows():
+            for _, row in breakdown_df.iterrows():
                 lbl = f"HS {row[code_col]}"
                 for c in feas_comp_cols:
                     bar_data.append({"product": lbl, "component": labels.get(c, c), "value": row.get(c, 0)})
             bdf = pd.DataFrame(bar_data)
-            product_order = top20.sort_values("feasibility_score", ascending=True).apply(
+            product_order = breakdown_df.sort_values(rank_col, ascending=True).apply(
                 lambda r: f"HS {r[code_col]}", axis=1).tolist()
             fig_fb = px.bar(bdf, x="value", y="product", color="component", orientation="h",
                             color_discrete_sequence=GL_PALETTE_EXT[:4],
                             title="Feasibility Breakdown",
                             category_orders={"product": product_order})
-            fig_fb.update_layout(template=GL_TEMPLATE, height=max(400, len(top20)*22),
+            fig_fb.update_layout(template=GL_TEMPLATE, height=max(400, len(breakdown_df) * 20),
                                  xaxis_title="Percentile Score", yaxis_title="",
                                  margin=dict(l=100), legend=dict(orientation="h", y=-0.15))
             st.plotly_chart(fig_fb, use_container_width=True)
@@ -325,18 +337,18 @@ with tab_quad:
             labels = {"attr_pci": "PCI", "attr_cog": "COG", "attr_market_size": "Mkt Size",
                       "attr_growth": "Growth", "attr_spillover": "Spillover"}
             bar_data = []
-            for _, row in top20.iterrows():
+            for _, row in breakdown_df.iterrows():
                 lbl = f"HS {row[code_col]}"
                 for c in attr_comp_cols:
                     bar_data.append({"product": lbl, "component": labels.get(c, c), "value": row.get(c, 0)})
             bdf = pd.DataFrame(bar_data)
-            product_order = top20.sort_values("attractiveness_score", ascending=True).apply(
+            product_order = breakdown_df.sort_values(rank_col, ascending=True).apply(
                 lambda r: f"HS {r[code_col]}", axis=1).tolist()
             fig_ab = px.bar(bdf, x="value", y="product", color="component", orientation="h",
                             color_discrete_sequence=GL_PALETTE_EXT[4:9],
                             title="Attractiveness Breakdown",
                             category_orders={"product": product_order})
-            fig_ab.update_layout(template=GL_TEMPLATE, height=max(400, len(top20)*22),
+            fig_ab.update_layout(template=GL_TEMPLATE, height=max(400, len(breakdown_df) * 20),
                                  xaxis_title="Percentile Score", yaxis_title="",
                                  margin=dict(l=100), legend=dict(orientation="h", y=-0.15))
             st.plotly_chart(fig_ab, use_container_width=True)
@@ -346,12 +358,19 @@ with tab_quad:
 with tab_tree:
     st.markdown(f"**HS2 Chapter composition** of each scenario's Top {top_n}.")
 
-    # Build unified HS2 color map
+    # Build unified HS2 color map from ALL scenarios' full pools (not just Top N)
+    # to ensure consistent and unique colors
     all_hs2_names = sorted(set(
         nm for res in scenario_results.values()
         for nm in res["hs4"]["hs2_name"].dropna().unique()
     ))
-    hs2_color_map = {nm: GL_PALETTE_EXT[i % len(GL_PALETTE_EXT)] for i, nm in enumerate(all_hs2_names)}
+    # Use a wide palette to maximize color distinctiveness
+    _extended_palette = (
+        GL_PALETTE_EXT
+        + ["#264653", "#E9C46A", "#F4A261", "#2A9D8F", "#E63946",
+           "#457B9D", "#1D3557", "#A8DADC", "#606C38", "#DDA15E"]
+    )
+    hs2_color_map = {nm: _extended_palette[i % len(_extended_palette)] for i, nm in enumerate(all_hs2_names)}
 
     # Render in 2×3 grid
     sname_list = list(active_scenarios.keys())
@@ -388,134 +407,7 @@ with tab_tree:
                 st.plotly_chart(fig_tm, use_container_width=True)
 
 
-# --- TAB 4: OCP LENS ---
-with tab_ocp:
-    st.markdown("**OCP ecosystem** — core products and strategic adjacencies in inorganic chemicals.")
-
-    ocp_codes = {
-        "2809": ("Phosphoric acid", "OCP Core", ""),
-        "3105": ("Fertilizers (DAP/MAP)", "OCP Core", ""),
-        "3103": ("Mineral phosphates", "OCP Core", ""),
-        "2806": ("Hydrochloric acid (HCl)", "Extension", "Batteries, Solar"),
-        "2847": ("Hydrogen peroxide (H2O2)", "Extension", ""),
-        "2815": ("Caustic soda (NaOH)", "Extension", "Green H2, Carbon Capture"),
-        "2818": ("Aluminium oxide (Al2O3)", "Extension", "Carbon Capture"),
-        "2814": ("Ammonia (NH3)", "Greenfield", "Green H2, Fertilizers"),
-        "2828": ("Hypochlorites", "Extension", "Water Treatment"),
-    }
-
-    # Pull from No Prior scenario (or first available)
-    ref_scenario = "No Prior" if "No Prior" in scenario_results else list(scenario_results.keys())[0]
-    ref_hs4 = scenario_results[ref_scenario]["hs4"]
-
-    ocp_rows = []
-    for code, (label, category, green_sc) in ocp_codes.items():
-        row = ref_hs4[ref_hs4["hs4_code"] == code]
-        if len(row) > 0:
-            r = row.iloc[0]
-            ocp_rows.append({
-                "label": label, "category": category, "green_sc": green_sc,
-                "feasibility": r["feasibility_score"], "attractiveness": r["attractiveness_score"],
-                "trade": r["global_export_value"], "rca": r.get("rca_mar", 0),
-            })
-        else:
-            # Product not in selected pool
-            sub = filtered[filtered["hs_product_code"].astype(str).str.zfill(6).str[:4] == code]
-            ocp_rows.append({
-                "label": label, "category": category, "green_sc": green_sc,
-                "feasibility": 0, "attractiveness": 0,
-                "trade": sub["global_export_value"].sum() if len(sub) > 0 else 0,
-                "rca": sub["rca_mar"].mean() if len(sub) > 0 else 0,
-            })
-
-    ocp_df = pd.DataFrame(ocp_rows).sort_values("feasibility", ascending=True)
-
-    cat_colors = {"OCP Core": MOROCCO_RED, "Extension": "#204B82", "Greenfield": "#8AB920"}
-
-    fig_ocp = go.Figure()
-    for cat, color in cat_colors.items():
-        subset = ocp_df[ocp_df["category"] == cat]
-        fig_ocp.add_trace(go.Bar(
-            y=subset["label"], x=subset["feasibility"], orientation="h",
-            marker_color=color, name=cat,
-            text=subset.apply(
-                lambda r: f"F={r['feasibility']:.0f}  A={r['attractiveness']:.0f}  "
-                          f"RCA={r['rca']:.1f}  {r['green_sc']}" if r['feasibility'] > 0
-                else f"Not in pool  RCA={r['rca']:.1f}", axis=1),
-            textposition="outside", textfont=dict(size=9),
-        ))
-
-    fig_ocp.update_layout(
-        template=GL_TEMPLATE,
-        title=dict(text="OCP Ecosystem — Feasibility of Adjacent Products", font=dict(color=MOROCCO_RED)),
-        xaxis_title="Feasibility Score", barmode="stack",
-        height=450, showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=-0.2),
-        margin=dict(l=200, r=150, t=50, b=80),
-    )
-    st.plotly_chart(fig_ocp, use_container_width=True)
-
-    # Ammonia vs Aluminium radar
-    st.markdown("#### Why Aluminium ranks and Ammonia doesn't")
-    col_l, col_r = st.columns([2, 1])
-
-    alu_hs4 = filtered[filtered["hs_product_code"].astype(str).str.zfill(6).str[:4] == "7601"]
-    amm_hs4 = filtered[filtered["hs_product_code"].astype(str).str.zfill(6).str[:4] == "2814"]
-
-    if len(alu_hs4) > 0 and len(amm_hs4) > 0:
-        dims = {
-            "amount_electric_energy": "Electricity\nIntensity",
-            "global_export_value": "Market\nSize",
-            "rca_mar": "Morocco\nRCA",
-            "density_mar": "Product Space\nProximity",
-            "pci": "Product\nComplexity",
-            "vulnerability_score": "Incumbent\nVulnerability",
-        }
-
-        def normalize(val, col):
-            mn, mx = filtered[col].min(), filtered[col].max()
-            if mx == mn:
-                return 50
-            n = (val - mn) / (mx - mn) * 100
-            if col == "vulnerability_score":
-                n = 100 - n
-            return max(0, min(100, n))
-
-        alu_vals = [normalize(alu_hs4[col].mean(), col) for col in dims]
-        amm_vals = [normalize(amm_hs4[col].mean(), col) for col in dims]
-        alu_vals.append(alu_vals[0])
-        amm_vals.append(amm_vals[0])
-        theta = list(dims.values()) + [list(dims.values())[0]]
-
-        fig_radar = go.Figure()
-        fig_radar.add_trace(go.Scatterpolar(
-            r=alu_vals, theta=theta, fill="toself", name="Aluminium (7601)",
-            line_color=MOROCCO_RED, fillcolor="rgba(194,34,41,0.15)", opacity=0.7,
-        ))
-        fig_radar.add_trace(go.Scatterpolar(
-            r=amm_vals, theta=theta, fill="toself", name="Ammonia (2814)",
-            line_color="#204B82", fillcolor="rgba(32,75,130,0.15)", opacity=0.7,
-        ))
-        fig_radar.update_layout(
-            template=GL_TEMPLATE,
-            polar=dict(radialaxis=dict(visible=True, range=[0, 100], tickfont=dict(size=9))),
-            height=450, showlegend=True,
-            legend=dict(orientation="h", yanchor="bottom", y=-0.15),
-            margin=dict(t=30, b=60),
-        )
-        with col_l:
-            st.plotly_chart(fig_radar, use_container_width=True)
-        with col_r:
-            st.markdown(
-                "**Ammonia** incumbents (Qatar, Saudi Arabia, Trinidad) are "
-                "**energy-surplus** countries — they are NOT vulnerable to displacement.\n\n"
-                "**Aluminium** incumbents are in energy-deficit countries, "
-                "electricity is a major cost driver, and Morocco has product space proximity.\n\n"
-                "Green ammonia is a **greenfield bet**, not a powershoring opportunity."
-            )
-
-
-# --- TAB 5: DATA TABLE ---
+# --- TAB 4: DATA TABLE ---
 with tab_data:
     st.markdown(f"**Cross-scenario summary** — all products appearing in any scenario's Top {top_n}.")
 
@@ -523,19 +415,37 @@ with tab_data:
 
     cross_rows = []
     for h, info in code_appearances.items():
-        # Get metadata from first scenario that has it
-        meta = {"description": "", "hs2_name": "", "trade": 0, "feas": [], "attr": []}
+        # Collect all scores from all scenarios that have this product
+        meta = {
+            "description": "", "hs2_name": "", "trade": 0,
+            "feas": [], "attr": [], "composite": [], "likelihood": [],
+            "feas_rca": [], "feas_density": [], "feas_hhi": [], "feas_distance": [],
+            "attr_pci": [], "attr_cog": [], "attr_market_size": [], "attr_growth": [], "attr_spillover": [],
+            "rca_mar": [], "density_mar": [], "elec_int": [],
+            "cbam_flag": 0, "green_flag": 0,
+        }
         for sname, res in scenario_results.items():
             src = res["hs4"] if "HS4" in agg_level else res["selected"]
             match = src[src[code_col].astype(str) == str(h)]
             if len(match) > 0:
                 r = match.iloc[0]
                 if not meta["description"]:
-                    meta["description"] = str(r.get("description", ""))[:50]
+                    meta["description"] = str(r.get("description", ""))
                     meta["hs2_name"] = str(r.get("hs2_name", ""))
                 meta["trade"] = max(meta["trade"], r.get("global_export_value", 0))
                 meta["feas"].append(r.get("feasibility_score", 0))
                 meta["attr"].append(r.get("attractiveness_score", 0))
+                meta["composite"].append(r.get("lhf_score", 0))
+                meta["likelihood"].append(r.get("likelihood_score", 0))
+                for k in ["feas_rca", "feas_density", "feas_hhi", "feas_distance",
+                          "attr_pci", "attr_cog", "attr_market_size", "attr_growth", "attr_spillover"]:
+                    meta[k].append(r.get(k, 0))
+                for k in ["rca_mar", "density_mar", "elec_int"]:
+                    meta[k].append(r.get(k, 0))
+                meta["cbam_flag"] = max(meta["cbam_flag"], r.get("cbam_flag", 0))
+                meta["green_flag"] = max(meta["green_flag"], r.get("green_flag", 0))
+
+        _avg = lambda lst: np.mean(lst) if lst else 0
 
         cross_rows.append({
             "Code": h,
@@ -543,24 +453,34 @@ with tab_data:
             "HS2 Chapter": meta["hs2_name"],
             "Appearances": info["total"],
             "Scenarios": ", ".join(info["scenarios"]),
-            "Avg Feasibility": np.mean(meta["feas"]) if meta["feas"] else 0,
-            "Avg Attractiveness": np.mean(meta["attr"]) if meta["attr"] else 0,
-            "Trade": meta["trade"],
+            "Composite (60F/40A)": round(_avg(meta["composite"]), 1),
+            "Feasibility": round(_avg(meta["feas"]), 1),
+            "Attractiveness": round(_avg(meta["attr"]), 1),
+            "Likelihood": round(_avg(meta["likelihood"]), 1),
+            "F: Density": round(_avg(meta["feas_density"]), 1),
+            "F: RCA": round(_avg(meta["feas_rca"]), 1),
+            "F: HHI": round(_avg(meta["feas_hhi"]), 1),
+            "F: Distance": round(_avg(meta["feas_distance"]), 1),
+            "A: PCI": round(_avg(meta["attr_pci"]), 1),
+            "A: COG": round(_avg(meta["attr_cog"]), 1),
+            "A: Market Size": round(_avg(meta["attr_market_size"]), 1),
+            "A: Growth": round(_avg(meta["attr_growth"]), 1),
+            "A: Spillover": round(_avg(meta["attr_spillover"]), 1),
+            "Morocco RCA": round(_avg(meta["rca_mar"]), 2),
+            "Morocco Density": round(_avg(meta["density_mar"]), 3),
+            "Elec Intensity": round(_avg(meta["elec_int"]), 2),
+            "Global Trade": meta["trade"],
+            "CBAM": int(meta["cbam_flag"]),
+            "Green SC": int(meta["green_flag"]),
         })
 
     cross_df = pd.DataFrame(cross_rows).sort_values(
-        ["Appearances", "Avg Feasibility"], ascending=[False, False]
+        ["Appearances", "Composite (60F/40A)"], ascending=[False, False]
     ).reset_index(drop=True)
     cross_df.index = cross_df.index + 1
     cross_df.index.name = "Rank"
 
-    # Format for display
-    display_df = cross_df.copy()
-    display_df["Trade"] = display_df["Trade"].apply(format_dollars)
-    display_df["Avg Feasibility"] = display_df["Avg Feasibility"].round(0).astype(int)
-    display_df["Avg Attractiveness"] = display_df["Avg Attractiveness"].round(0).astype(int)
-
-    st.dataframe(display_df, use_container_width=True, height=600)
+    st.dataframe(cross_df, use_container_width=True, height=600)
     st.markdown(f"**{len(cross_df)} unique products** across {n_scenarios} scenarios")
     download_csv(cross_df, "powershoring_cross_scenario.csv",
                  f"Scenarios: {', '.join(active_scenarios.keys())} | 60F/40A | Top {top_n}")
