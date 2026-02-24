@@ -97,7 +97,7 @@ with st.sidebar:
     _color_labels = {**VARIABLE_LABELS, "top_n": "Top N (by composite score)"}
     color_var = st.selectbox("Color by", COLOR_VARS, key="color_multi",
                              format_func=lambda x: _color_labels.get(x, x))
-    label_top = st.slider("Label top N", 0, 50, 30, key="prio_label_multi")
+    top_n_count = st.slider("Top N", 10, 50, 30, 5, key="prio_topn")
 
 
 # ============================================================
@@ -201,15 +201,15 @@ col4.metric(f"Avg Composite ({feas_pct}F/{attr_pct}A)", f"{df['composite_score']
 # ============================================================
 st.markdown("### Feasibility vs. Attractiveness")
 
-plot_df, color_col = prepare_color(df, color_var, top_n_count=label_top)
-ckwargs = color_map_for(color_var, plot_df, color_col, top_n_count=label_top)
+plot_df, color_col = prepare_color(df, color_var, top_n_count=top_n_count)
+ckwargs = color_map_for(color_var, plot_df, color_col, top_n_count=top_n_count)
 
 plot_df["_size"] = plot_df["global_export_value"].clip(lower=0).fillna(0) if "global_export_value" in plot_df.columns else 1
 
 # Category order: render "Other" first so Top N dots appear on top
 cat_order = {}
 if color_var == "top_n":
-    cat_order = {color_col: ["Other", f"Top {label_top}"]}
+    cat_order = {color_col: ["Other", f"Top {top_n_count}"]}
 
 fig = px.scatter(
     plot_df, x="feasibility_score", y="attractiveness_score",
@@ -221,16 +221,6 @@ fig = px.scatter(
     hover_data={c: True for c in ["hs_product_code", "hs2_name", "composite_score"] if c in plot_df.columns},
     title=f"Feasibility vs. Attractiveness ({feas_pct}F / {attr_pct}A)",
 )
-
-# Label top products
-if label_top > 0:
-    top_prods = df.nlargest(label_top, "composite_score")
-    for _, row in top_prods.iterrows():
-        desc = str(row.get("description", ""))[:35]
-        fig.add_annotation(
-            x=row["feasibility_score"], y=row["attractiveness_score"],
-            text=desc, showarrow=True, arrowhead=2, font=dict(size=9),
-        )
 
 fig.update_layout(
     xaxis_title="Feasibility Score",
