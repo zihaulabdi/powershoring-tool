@@ -237,3 +237,149 @@ def format_dollars(value):
         return f"${value/1e6:.1f}M"
     else:
         return f"${value:,.0f}"
+
+
+# ============================================================
+# SCENARIO DEFINITIONS & SCORING
+# ============================================================
+SCENARIO_DEFS = {
+    "No Prior": {
+        "weights": {"carriers": 25, "elec": 25, "vuln": 25, "cbam": 25, "growth": 0},
+        "pre_filter": None,
+        "desc": "Equal weight baseline — no assumption about which driver matters most.",
+    },
+    "Electricity Intensity": {
+        "weights": {"carriers": 0, "elec": 100, "vuln": 0, "cbam": 0, "growth": 0},
+        "pre_filter": None,
+        "desc": "Pure electricity cost mechanism — industries with highest electricity share of costs.",
+    },
+    "Energy + Electricity": {
+        "weights": {"carriers": 50, "elec": 50, "vuln": 0, "cbam": 0, "growth": 0},
+        "pre_filter": None,
+        "desc": "Both fuel and electricity intensity — captures current and emerging electrification.",
+    },
+    "CBAM Dominant": {
+        "weights": {"carriers": 0, "elec": 0, "vuln": 0, "cbam": 100, "growth": 0},
+        "pre_filter": "cbam",
+        "desc": "EU regulatory pressure — pre-filtered to CBAM-covered products only.",
+    },
+    "Disruption Opportunity": {
+        "weights": {"carriers": 0, "elec": 0, "vuln": 100, "cbam": 0, "growth": 0},
+        "pre_filter": None,
+        "desc": "Incumbent vulnerability — where current exporters are most energy-deficit.",
+    },
+    "Market Growth": {
+        "weights": {"carriers": 0, "elec": 0, "vuln": 0, "cbam": 0, "growth": 100},
+        "pre_filter": None,
+        "desc": "Fastest-growing global trade — expanding markets with easier entry.",
+    },
+}
+
+DEFAULT_FEAS_WEIGHTS = {"rca": 20, "density": 50, "hhi": 15, "distance": 15}
+DEFAULT_ATTR_WEIGHTS = {"market_size": 15, "growth": 15, "cog": 30, "pci": 30, "spillover": 10}
+
+
+def run_scenario_scoring(df, likelihood_weights, feas_weights, attr_weights):
+    """Run full pipeline: likelihood → top 50% filter → F/A scoring.
+
+    Args:
+        df: Filtered product DataFrame (Stage 1 output).
+        likelihood_weights: Dict with keys carriers, elec, vuln, cbam, growth.
+        feas_weights: Dict with keys rca, density, hhi, distance.
+        attr_weights: Dict with keys market_size, growth, cog, pci, spillover.
+
+    Returns:
+        Scored DataFrame with likelihood, feasibility, attractiveness, lhf, sb scores
+        and all component percentiles.
+    """
+    d = df.copy()
+
+    # Likelihood components
+    comps = {}
+    comps["carriers"] = percentile_rank(d["amount_carriers"].fillna(0))
+    comps["elec"] = percentile_rank(d["amount_electric_energy"].fillna(0))
+    comps["vuln"] = (
+        percentile_rank(-d["vulnerability_score"].fillna(0))
+        if "vulnerability_score" in d.columns
+        else pd.Series(50, index=d.index)
+    )
+    comps["cbam"] = (
+        percentile_rank(d["cbam_score"].fillna(0))
+        if "cbam_score" in d.columns
+        else pd.Series(50, index=d.index)
+    )
+    comps["growth"] = percentile_rank(d["export_cagr_2012_2023"].fillna(0))
+
+    active = {k: v for k, v in likelihood_weights.items() if v > 0}
+    if not active:
+        d["likelihood_score"] = 50.0
+    else:
+        total = sum(active.values())
+        d["likelihood_score"] = sum(active[k] * comps[k] for k in active) / total
+
+    # Top 50% by likelihood
+    cutoff = d["likelihood_score"].quantile(0.5)
+    sel = d[d["likelihood_score"] >= cutoff].copy()
+
+    # Feasibility
+    fc = {}
+    fc["rca"] = percentile_rank(sel["rca_mar"].fillna(0))
+    fc["density"] = percentile_rank(sel["density_mar"].fillna(0))
+    fc["hhi"] = percentile_rank(sel["inv_hhi"].fillna(0))
+    fc["distance"] = percentile_rank(-sel["product_distance"].fillna(sel["product_distance"].median()))
+    ftotal = sum(feas_weights.values())
+    sel["feasibility_score"] = sum(feas_weights[k] * fc[k] for k in feas_weights) / ftotal
+    for k, v in fc.items():
+        sel[f"feas_{k}"] = v
+
+    # Attractiveness
+    ac = {}
+    ac["market_size"] = percentile_rank(sel["global_export_value"].fillna(0))
+    ac["growth"] = percentile_rank(sel["export_cagr_2012_2023"].fillna(0))
+    ac["cog"] = percentile_rank(sel["cog_mar"].fillna(0))
+    ac["pci"] = percentile_rank(sel["pci"].fillna(0))
+    ac["spillover"] = percentile_rank(sel["weighted_degree"].fillna(0))
+    atotal = sum(attr_weights.values())
+    sel["attractiveness_score"] = sum(attr_weights[k] * ac[k] for k in attr_weights) / atotal
+    for k, v in ac.items():
+        sel[f"attr_{k}"] = v
+
+    # Composite lenses
+    sel["lhf_score"] = 0.60 * sel["feasibility_score"] + 0.40 * sel["attractiveness_score"]
+    sel["sb_score"] = 0.40 * sel["feasibility_score"] + 0.60 * sel["attractiveness_score"]
+
+    return sel
+
+
+def aggregate_to_hs4(sel):
+    """Aggregate scored HS6 products to HS4 level using trade-weighted averages.
+
+    Returns DataFrame with one row per HS4 code.
+    """
+    sel = sel.copy()
+    sel["hs4_code"] = sel["hs_product_code"].astype(str).str.zfill(6).str[:4]
+
+    score_cols = [c for c in sel.columns if c.endswith("_score") or c.startswith("feas_") or c.startswith("attr_")]
+
+    def _tw_mean(g, col):
+        w = g["global_export_value"].fillna(0)
+        return np.average(g[col], weights=w) if w.sum() > 0 else g[col].mean()
+
+    rows = []
+    for (hs4, hs2n), g in sel.groupby(["hs4_code", "hs2_name"]):
+        descs = g.sort_values("global_export_value", ascending=False)["description"].values
+        desc = str(descs[0])[:60] if len(descs) > 0 and descs[0] is not None else ""
+        r = {
+            "hs4_code": hs4, "hs2_name": hs2n, "description": desc,
+            "n_products": len(g), "global_export_value": g["global_export_value"].sum(),
+            "rca_mar": g["rca_mar"].mean(), "density_mar": g["density_mar"].mean(),
+            "elec_int": _tw_mean(g, "amount_electric_energy"),
+            "cbam_flag": g["cbam_flag"].max() if "cbam_flag" in g.columns else 0,
+            "green_flag": g["green_supply_chain_flag"].max() if "green_supply_chain_flag" in g.columns else 0,
+        }
+        for col in score_cols:
+            if col in g.columns:
+                r[col] = _tw_mean(g, col)
+        rows.append(r)
+
+    return pd.DataFrame(rows)
