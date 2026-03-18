@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils import (
     load_data, GL_PALETTE_EXT, GL_TEMPLATE, MOROCCO_RED, GREY,
     VARIABLE_LABELS, make_treemap, make_bar_chart,
-    download_csv, format_dollars, percentile_rank,
+    download_csv, format_dollars, percentile_rank, get_hs2_color_map,
 )
 
 st.set_page_config(page_title="Stage 1: Filtering", layout="wide")
@@ -28,22 +28,42 @@ with st.sidebar:
     st.header("Filter Controls")
 
     st.subheader("Exclusions")
-    exclude_non_mfg = st.checkbox("Exclude non-manufacturing (HS 01-24)", value=False)
-    exclude_extractive = st.checkbox("Exclude extractive (HS 25-27)", value=True)
+    _excl = st.checkbox(
+        "Exclude non-manufacturing & extractive (HS 01–27)",
+        value=True,
+        help="Removes agriculture, food, raw materials, fuels, and mining — focuses on manufactured goods (HS 28+)",
+    )
+    exclude_non_mfg = _excl
+    exclude_extractive = _excl
 
     st.subheader("Energy Thresholds")
     energy_pct = st.slider(
-        "Energy intensity (carriers) percentile",
+        "Total energy intensity percentile",
         0, 100, 75,
-        help="amount_carriers >= this percentile"
+        help=(
+            "Filters by amount_carriers — the total secondary energy embodied in production "
+            "(fuel + electricity combined), measured in MJ per $ of output (USEEIO). "
+            "Higher percentile = more energy-intensive industries only."
+        ),
     )
     elec_pct = st.slider(
         "Electricity intensity percentile",
         0, 100, 50,
-        help="amount_electric_energy >= this percentile"
+        help=(
+            "Filters by amount_electric_energy — electricity-specific energy intensity (MJ/$). "
+            "This is the key powershoring variable: industries with high electricity intensity "
+            "benefit most from cheap renewable electricity."
+        ),
     )
-    filter_logic = st.radio("Energy filter logic", ["OR", "AND"], index=0,
-                            help="OR: either criterion suffices. AND: both required.")
+    filter_logic = st.radio(
+        "Energy filter logic", ["OR", "AND"], index=0,
+        help=(
+            "OR: a product passes if it exceeds the total energy OR electricity threshold — "
+            "broader selection, more candidates. "
+            "AND: must exceed both thresholds simultaneously — stricter, smaller set, "
+            "captures only the most purely electricity-intensive industries."
+        ),
+    )
 
     st.subheader("Trade Volume")
     trade_pct = st.slider("Trade volume percentile", 0, 100, 15,
@@ -57,8 +77,6 @@ with st.sidebar:
         all_topics = sorted([t for t in df["green_topic"].unique() if t])
         green_topics = st.multiselect("Select supply chains", all_topics, default=all_topics)
 
-    rca_threshold = st.slider("Morocco RCA minimum", 0.0, 5.0, 0.0, 0.1,
-                              help="Set > 0 to require Morocco has existing exports")
 
 # ============================================================
 # APPLY FILTERS
@@ -67,28 +85,27 @@ filtered = df.copy()
 filter_parts = []
 
 # Exclusions
-if exclude_non_mfg:
-    filtered = filtered[filtered["hs2_code"].astype(int) >= 25]
-    filter_parts.append("Manufacturing only (HS >= 25)")
-if exclude_extractive:
-    filtered = filtered[~filtered["hs2_code"].astype(int).isin([25, 26, 27])]
-    filter_parts.append("Excl. extractive (HS 25-27)")
+if exclude_non_mfg:  # both flags are identical (single checkbox)
+    filtered = filtered[filtered["hs2_code"].astype(int) >= 28]
+    filter_parts.append("Manufacturing only (HS 28+)")
 
 # Energy thresholds
-energy_thresh = df["amount_carriers"].quantile(energy_pct / 100)
-elec_thresh = df["amount_electric_energy"].quantile(elec_pct / 100)
+# Use fillna(0) so products with missing energy data are treated as 0 intensity.
+# This ensures all ~5,200 products are included when sliders are set to 0th percentile.
+energy_thresh = df["amount_carriers"].fillna(0).quantile(energy_pct / 100)
+elec_thresh = df["amount_electric_energy"].fillna(0).quantile(elec_pct / 100)
 trade_thresh = df["global_export_value"].quantile(trade_pct / 100)
 
 if filter_logic == "OR":
     energy_mask = (
-        (filtered["amount_carriers"] >= energy_thresh) |
-        (filtered["amount_electric_energy"] >= elec_thresh)
+        (filtered["amount_carriers"].fillna(0) >= energy_thresh) |
+        (filtered["amount_electric_energy"].fillna(0) >= elec_thresh)
     )
     filter_parts.append(f"Carriers >= {energy_thresh:.2f} MJ/$ ({energy_pct}th pct) OR Electricity >= {elec_thresh:.2f} MJ/$ ({elec_pct}th pct)")
 else:
     energy_mask = (
-        (filtered["amount_carriers"] >= energy_thresh) &
-        (filtered["amount_electric_energy"] >= elec_thresh)
+        (filtered["amount_carriers"].fillna(0) >= energy_thresh) &
+        (filtered["amount_electric_energy"].fillna(0) >= elec_thresh)
     )
     filter_parts.append(f"Carriers >= {energy_thresh:.2f} AND Electricity >= {elec_thresh:.2f}")
 
@@ -106,10 +123,6 @@ if green_only and green_topics:
         lambda x: any(t in str(x) for t in green_topics)
     )]
     filter_parts.append(f"Green SC: {', '.join(green_topics)}")
-if rca_threshold > 0:
-    filtered = filtered[filtered["rca_mar"] >= rca_threshold]
-    filter_parts.append(f"Morocco RCA >= {rca_threshold}")
-
 filter_description = " | ".join(filter_parts)
 
 # Save to session state
@@ -125,7 +138,6 @@ col3.metric("Global Trade", format_dollars(filtered["global_export_value"].sum()
 col4.metric("HS2 Chapters", filtered["hs2_code"].nunique())
 col5.metric("Avg Elec. Intensity", f"{filtered['amount_electric_energy'].mean():.2f} MJ/$")
 
-st.caption(f"**Active filters:** {filter_description}")
 
 # ============================================================
 # TABS  (Scatter removed per user request)
@@ -184,10 +196,10 @@ with tab_bar:
 
 # --- DISTRIBUTIONS ---
 with tab_dist:
-    # Row 1: Energy Intensity + Electricity Intensity
-    dist_r1c1, dist_r1c2 = st.columns(2)
-    with dist_r1c1:
-        st.markdown("**Energy Intensity (Carriers) Distribution**")
+    dist_c1, dist_c2, dist_c3 = st.columns(3)
+
+    with dist_c1:
+        st.markdown("**Total Energy Intensity (Carriers)**")
         fig_e = go.Figure()
         fig_e.add_trace(go.Histogram(
             x=df["amount_carriers"].dropna(), name="All products",
@@ -199,59 +211,53 @@ with tab_dist:
         ))
         fig_e.add_vline(x=energy_thresh, line_dash="dash", line_color="black",
                         annotation_text=f"{energy_pct}th pct: {energy_thresh:.1f}")
-        fig_e.update_layout(template=GL_TEMPLATE, barmode="overlay", height=350,
-                            xaxis_title="Amount Carriers (MJ/$)", yaxis_title="Count")
+        fig_e.update_layout(template=GL_TEMPLATE, barmode="overlay", height=400,
+                            xaxis_title="Carriers (MJ/$)", yaxis_title="Count",
+                            legend=dict(orientation="h", yanchor="top", y=-0.22,
+                                        xanchor="center", x=0.5, bgcolor="rgba(0,0,0,0)"),
+                            margin=dict(t=20, b=80))
         st.plotly_chart(fig_e, use_container_width=True)
 
-    with dist_r1c2:
-        st.markdown("**Electricity Intensity Distribution**")
-        fig_elec = go.Figure()
-        fig_elec.add_trace(go.Histogram(
-            x=df["amount_electric_energy"].dropna(), name="All products",
-            marker_color=GREY, opacity=0.6, nbinsx=50,
-        ))
-        fig_elec.add_trace(go.Histogram(
-            x=filtered["amount_electric_energy"].dropna(), name="Filtered",
-            marker_color=MOROCCO_RED, opacity=0.7, nbinsx=50,
-        ))
-        fig_elec.add_vline(x=elec_thresh, line_dash="dash", line_color="black",
-                           annotation_text=f"{elec_pct}th pct: {elec_thresh:.1f}")
-        fig_elec.update_layout(template=GL_TEMPLATE, barmode="overlay", height=350,
-                               xaxis_title="Electricity Intensity (MJ/$)", yaxis_title="Count")
-        st.plotly_chart(fig_elec, use_container_width=True)
-
-    # Row 2: Electricity Share + Trade Volume
-    dist_r2c1, dist_r2c2 = st.columns(2)
-    with dist_r2c1:
-        st.markdown("**Electricity Share Distribution**")
+    with dist_c2:
+        st.markdown("**Electricity Intensity**")
         fig_es = go.Figure()
         fig_es.add_trace(go.Histogram(
-            x=df["electricity_share"].dropna(), name="All products",
-            marker_color=GREY, opacity=0.6, nbinsx=50,
+            x=df["amount_electric_energy"].dropna(),
+            name="All products", marker_color=GREY, opacity=0.6, nbinsx=50,
         ))
         fig_es.add_trace(go.Histogram(
-            x=filtered["electricity_share"].dropna(), name="Filtered",
-            marker_color=MOROCCO_RED, opacity=0.7, nbinsx=50,
+            x=filtered["amount_electric_energy"].dropna(),
+            name="Filtered", marker_color=MOROCCO_RED, opacity=0.7, nbinsx=50,
         ))
-        fig_es.update_layout(template=GL_TEMPLATE, barmode="overlay", height=350,
-                             xaxis_title="Electricity Share (electricity / carriers)", yaxis_title="Count")
+        fig_es.add_vline(x=elec_thresh, line_dash="dash", line_color="black",
+                         annotation_text=f"{elec_pct}th pct: {elec_thresh:.1f}")
+        fig_es.update_layout(template=GL_TEMPLATE, barmode="overlay", height=400,
+                             xaxis_title="Electricity Intensity (MJ/$)", yaxis_title="Count",
+                             legend=dict(orientation="h", yanchor="top", y=-0.22,
+                                         xanchor="center", x=0.5, bgcolor="rgba(0,0,0,0)"),
+                             margin=dict(t=20, b=80))
         st.plotly_chart(fig_es, use_container_width=True)
 
-    with dist_r2c2:
-        st.markdown("**Trade Volume Distribution**")
+    with dist_c3:
+        st.markdown("**Trade Volume (log scale)**")
         fig_t = go.Figure()
         fig_t.add_trace(go.Histogram(
-            x=df["global_export_value"].dropna().apply(lambda x: max(x, 1)).apply(
-                lambda x: math.log10(x)
-            ), name="All products", marker_color=GREY, opacity=0.6, nbinsx=50,
+            x=df["global_export_value"].dropna().apply(lambda x: math.log10(max(x, 1))),
+            name="All products", marker_color=GREY, opacity=0.6, nbinsx=50,
         ))
         fig_t.add_trace(go.Histogram(
-            x=filtered["global_export_value"].dropna().apply(lambda x: max(x, 1)).apply(
-                lambda x: math.log10(x)
-            ), name="Filtered", marker_color=MOROCCO_RED, opacity=0.7, nbinsx=50,
+            x=filtered["global_export_value"].dropna().apply(lambda x: math.log10(max(x, 1))),
+            name="Filtered", marker_color=MOROCCO_RED, opacity=0.7, nbinsx=50,
         ))
-        fig_t.update_layout(template=GL_TEMPLATE, barmode="overlay", height=350,
-                            xaxis_title="Log10(Global Export Value $)", yaxis_title="Count")
+        fig_t.add_vline(
+            x=math.log10(max(trade_thresh, 1)), line_dash="dash", line_color="black",
+            annotation_text=f"{trade_pct}th pct: {format_dollars(trade_thresh)}",
+        )
+        fig_t.update_layout(template=GL_TEMPLATE, barmode="overlay", height=400,
+                            xaxis_title="Log₁₀(Export Value $)", yaxis_title="Count",
+                            legend=dict(orientation="h", yanchor="top", y=-0.22,
+                                        xanchor="center", x=0.5, bgcolor="rgba(0,0,0,0)"),
+                            margin=dict(t=20, b=80))
         st.plotly_chart(fig_t, use_container_width=True)
 
 # --- DATA TABLE ---

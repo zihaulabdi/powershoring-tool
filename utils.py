@@ -66,6 +66,26 @@ def load_data():
     return df
 
 
+@st.cache_data
+def get_hs2_color_map():
+    """Build a fixed HS2 chapter name → color map from the full product universe.
+
+    Colors are assigned deterministically by sorted hs2_code so every page and
+    every filter state always renders the same chapter in the same color.
+    """
+    df = pd.read_parquet(MASTER_DATA)
+    chapters = (
+        df[["hs2_code", "hs2_name"]]
+        .drop_duplicates()
+        .sort_values("hs2_code")
+        .reset_index(drop=True)
+    )
+    return {
+        row["hs2_name"]: GL_PALETTE_EXT[i % len(GL_PALETTE_EXT)]
+        for i, row in chapters.iterrows()
+    }
+
+
 # ============================================================
 # PLOTLY THEME
 # ============================================================
@@ -90,37 +110,43 @@ GL_TEMPLATE = get_gl_template()
 # ============================================================
 # CHART HELPERS
 # ============================================================
-def make_treemap(df, value_col, label_col="hs2_name", color_col="hs2_code", title="",
-                 color_map=None):
+def make_treemap(df, value_col, title="", color_map=None, size_by="value"):
     """Create an interactive Plotly treemap at HS2 level.
 
     Args:
-        color_map: Optional dict mapping hs2_name → color hex for consistent coloring
-                   across multiple treemaps.
+        value_col: Column to aggregate (sum) — used for hover info.
+        color_map: Dict mapping hs2_name → color hex. Defaults to get_hs2_color_map()
+                   for consistent colors across pages.
+        size_by: "value" = size tiles by sum of value_col (default),
+                 "count" = size tiles by number of HS6 products in each chapter.
     """
     agg = df.groupby(["hs2_code", "hs2_name"]).agg(
         value=(value_col, "sum"),
         n_products=("hs_product_code", "count"),
     ).reset_index()
-    agg = agg.sort_values("value", ascending=False)
 
-    color_kwargs = {}
-    if color_map:
-        color_kwargs["color_discrete_map"] = color_map
-    else:
-        color_kwargs["color_discrete_sequence"] = GL_PALETTE_EXT
+    if color_map is None:
+        color_map = get_hs2_color_map()
+
+    treemap_values = "n_products" if size_by == "count" else "value"
 
     fig = px.treemap(
         agg,
         path=["hs2_name"],
-        values="value",
+        values=treemap_values,
         color="hs2_name",
-        **color_kwargs,
+        color_discrete_map=color_map,
         title=title,
-        custom_data=["hs2_code", "n_products"],
+        custom_data=["hs2_code", "n_products", "value"],
     )
     fig.update_traces(
-        hovertemplate="<b>%{label}</b><br>Value: %{value:,.0f}<br>HS2: %{customdata[0]}<br>Products: %{customdata[1]}<extra></extra>",
+        hovertemplate=(
+            "<b>%{label}</b><br>"
+            "HS2: %{customdata[0]}<br>"
+            "Products: %{customdata[1]}<br>"
+            "Value: %{customdata[2]:,.0f}"
+            "<extra></extra>"
+        ),
         textinfo="label+percent root",
     )
     fig.update_layout(
@@ -339,7 +365,7 @@ def run_scenario_scoring(df, likelihood_weights, feas_weights, attr_weights):
     ac["growth"] = percentile_rank(sel["export_cagr_2012_2023"].fillna(0))
     ac["cog"] = percentile_rank(sel["cog_mar"].fillna(0))
     ac["pci"] = percentile_rank(sel["pci"].fillna(0))
-    ac["spillover"] = percentile_rank(sel["weighted_degree"].fillna(0))
+    ac["spillover"] = percentile_rank(sel["weighted_degree"].fillna(sel["weighted_degree"].median()))
     atotal = sum(attr_weights.values())
     sel["attractiveness_score"] = sum(attr_weights[k] * ac[k] for k in attr_weights) / atotal
     for k, v in ac.items():
