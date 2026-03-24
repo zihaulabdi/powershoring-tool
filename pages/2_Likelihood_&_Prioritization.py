@@ -282,30 +282,41 @@ st.plotly_chart(fig_lhood_tm, use_container_width=True)
 # ============================================================
 # SECTION 2 — SCATTER: FEASIBILITY VS ATTRACTIVENESS
 # ============================================================
-st.markdown("### Feasibility vs. Attractiveness")
+selected_idx = set(selected.index)
+top_codes = set(
+    df[df.index.isin(selected_idx)].nlargest(top_n_highlight, "composite_score").index
+)
 
-# Color: top N red, rest grey
-top_codes = set(df.nlargest(top_n_highlight, "composite_score").index)
-df["_color"] = df.index.map(lambda i: f"Top {top_n_highlight}" if i in top_codes else "Other")
+st.markdown(
+    f"### Feasibility vs. Attractiveness — "
+    f"{len(selected):,} selected products (cutoff ≥ {cutoff:.1f})"
+)
 
-# Truncated description for hover
-df["_desc_short"] = df["description"].fillna("").str[:60]
+# Only show products that passed the likelihood cutoff.
+# Re-filter df (which has F/A scores) by the selected index.
+# Red = top N by composite score, grey = rest of selected pool.
+plot_df = df[df.index.isin(selected_idx)].copy()
+plot_df["_color"] = plot_df.index.map(
+    lambda i: f"Top {top_n_highlight}" if i in top_codes else "Other"
+)
+plot_df["_size"] = plot_df["global_export_value"].clip(lower=1).apply(np.log10)
+plot_df["_desc_short"] = plot_df["description"].fillna("").str[:60]
 
 fig_sc = px.scatter(
-    df,
+    plot_df,
     x="feasibility_score",
     y="attractiveness_score",
-    size=df["global_export_value"].clip(lower=0).fillna(0) if "global_export_value" in df.columns else None,
-    size_max=28,
+    size="_size",
+    size_max=20,
     color="_color",
     color_discrete_map={f"Top {top_n_highlight}": MOROCCO_RED, "Other": GREY},
     category_orders={"_color": ["Other", f"Top {top_n_highlight}"]},
-    custom_data=["hs_product_code", "_desc_short", "hs2_name", "composite_score", "global_export_value"],
+    custom_data=["hs_product_code", "_desc_short", "hs2_name", "composite_score", "likelihood_score"],
 )
 
 # Median reference lines
-feas_med = df["feasibility_score"].median()
-attr_med = df["attractiveness_score"].median()
+feas_med = plot_df["feasibility_score"].median()
+attr_med = plot_df["attractiveness_score"].median()
 fig_sc.add_vline(x=feas_med, line_dash="dash", line_color="#bbbbbb", line_width=1)
 fig_sc.add_hline(y=attr_med, line_dash="dash", line_color="#bbbbbb", line_width=1)
 
@@ -315,7 +326,7 @@ fig_sc.update_traces(
         "Chapter: %{customdata[2]}<br>"
         "Feasibility: %{x:.1f}  |  Attractiveness: %{y:.1f}<br>"
         "Composite: %{customdata[3]:.1f}<br>"
-        "Trade: $%{customdata[4]:,.0f}"
+        "Likelihood: %{customdata[4]:.1f}"
         "<extra></extra>"
     )
 )
