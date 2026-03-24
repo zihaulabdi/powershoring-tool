@@ -299,7 +299,7 @@ plot_df = df[df.index.isin(selected_idx)].copy()
 plot_df["_color"] = plot_df.index.map(
     lambda i: f"Top {top_n_highlight}" if i in top_codes else "Other"
 )
-plot_df["_size"] = plot_df["global_export_value"].clip(lower=1).apply(np.log10)
+plot_df["_size"] = plot_df["global_export_value"].clip(lower=0).fillna(0)
 plot_df["_desc_short"] = plot_df["description"].fillna("").str[:60]
 
 fig_sc = px.scatter(
@@ -307,7 +307,7 @@ fig_sc = px.scatter(
     x="feasibility_score",
     y="attractiveness_score",
     size="_size",
-    size_max=20,
+    size_max=28,
     color="_color",
     color_discrete_map={f"Top {top_n_highlight}": MOROCCO_RED, "Other": GREY},
     category_orders={"_color": ["Other", f"Top {top_n_highlight}"]},
