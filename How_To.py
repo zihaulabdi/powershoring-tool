@@ -84,10 +84,8 @@ with st.expander("Stage 1: Filtering", expanded=True):
 
     st.markdown("**What gets excluded by default**")
     st.markdown(
-        "HS chapters 01 to 24 (agriculture and food) are excluded because powershoring is a manufacturing "
-        "phenomenon driven by production energy costs, not agricultural input costs. "
-        "HS chapters 25 to 27 (mining, stone, mineral fuels) are excluded because energy is a revenue "
-        "source in extractive industries, not a cost input. Both exclusions can be turned off."
+        "HS chapters 01 to 24 (agriculture and food) and chapters 25 to 27 (mining and mineral fuels) "
+        "are excluded to keep the focus on manufacturing. Both exclusions can be turned off."
     )
 
     st.markdown("**Energy intensity**")
