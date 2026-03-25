@@ -107,8 +107,7 @@ with st.expander("Stage 1: Filtering", expanded=True):
         )
     st.markdown(
         "The filter logic (OR / AND) determines whether a product needs to clear one threshold or both. "
-        "OR is the default and produces a broader pool covering both fuel-intensive and "
-        "electricity-intensive products. AND produces a narrower, electricity-focused list."
+        "OR is the default and produces a broader pool."
     )
 
     st.markdown("**Trade volume**")
