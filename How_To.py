@@ -225,28 +225,6 @@ with st.expander("Stage 2: Likelihood and Prioritization", expanded=True):
             "Central industries generate knowledge and input linkages that benefit adjacent sectors."
         )
 
-    st.divider()
-
-    st.markdown("### The Feasibility vs. Attractiveness scatter")
-    st.markdown(
-        "The scatter is the primary output of this stage. Each bubble is one product that passed "
-        "the likelihood cutoff. The x-axis is feasibility (Morocco's readiness, 0 to 100), "
-        "the y-axis is attractiveness (market opportunity, 0 to 100), and bubble size reflects "
-        "global trade volume. Red bubbles are the top N by composite score. "
-        "Grey bubbles passed the likelihood cutoff but fall outside the top N."
-    )
-    st.markdown(
-        "The dashed lines mark the medians of the selected pool. "
-        "The upper-right quadrant is where the strongest candidates sit, scoring above median "
-        "on both dimensions. Upper-left (high attractiveness, lower feasibility) are longer-horizon "
-        "targets that require capability investment first. "
-        "Lower-right (high feasibility, lower attractiveness) are easier entry points "
-        "with more limited strategic payoff."
-    )
-    st.markdown(
-        "The scatter updates dynamically. Changing the likelihood weights shifts which products "
-        "pass the cutoff. Tightening the cutoff reduces the number of bubbles shown."
-    )
 
 st.divider()
 
