@@ -28,7 +28,7 @@ if "saved_scenarios" not in st.session_state:
 
 st.title("Powershoring Industry Targeting Tool")
 st.markdown("**Morocco** — Identifying energy-intensive industries for powershoring")
-st.caption("Harvard Growth Lab · OCP Morocco Green Growth Study")
+st.caption("Harvard Growth Lab · UM6P Economic Complexity Unit")
 
 st.divider()
 
