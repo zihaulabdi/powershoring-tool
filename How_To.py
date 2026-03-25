@@ -55,8 +55,7 @@ col_a, col_b, col_c = st.columns(3)
 with col_a:
     st.markdown(
         "**1. Filtering**\n\n"
-        "Define the eligible universe by setting energy intensity and trade volume thresholds. "
-        "Roughly 400 to 600 products survive."
+        "Define the eligible universe by setting energy intensity and trade volume thresholds."
     )
 with col_b:
     st.markdown(
