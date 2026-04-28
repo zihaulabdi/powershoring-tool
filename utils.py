@@ -12,9 +12,27 @@ import plotly.io as pio
 # PATHS
 # ============================================================
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(APP_DIR, "data")
+CODE_DIR = os.path.dirname(APP_DIR)
+PROJECT_DIR = os.path.dirname(CODE_DIR)
+
+# The same utils.py is used in two places:
+#   1. Local development: Powershoring/02_Code/app/
+#   2. Deployment repo:   /Users/zia226/powershoring-tool/
+# Prefer the local project data when present; otherwise fall back to the
+# deployed app's data/ folder. This avoids hand-editing path logic during sync.
+LOCAL_DATA_DIR = os.path.join(PROJECT_DIR, "01_Data")
+DEPLOY_DATA_DIR = os.path.join(APP_DIR, "data")
+DATA_DIR = LOCAL_DATA_DIR if os.path.exists(os.path.join(LOCAL_DATA_DIR, "master_product_data.parquet")) else DEPLOY_DATA_DIR
 MASTER_DATA = os.path.join(DATA_DIR, "master_product_data.parquet")
 HS4_DESCRIPTIONS = os.path.join(DATA_DIR, "hs4_descriptions.csv")
+
+METHODOLOGY_VERSION = "2026-04-28_four_scenario_fixed_fa_universe_v1"
+FA_PERCENTILE_UNIVERSE = "stage1_candidate_pool"
+
+DEFAULT_ENERGY_PERCENTILE = 0.75
+DEFAULT_ELEC_PERCENTILE = 0.50
+DEFAULT_TRADE_PERCENTILE = 0.15
+DEFAULT_FILTER_LOGIC = "OR"
 
 # ============================================================
 # GROWTH LAB COLOR PALETTE
@@ -36,7 +54,7 @@ VARIABLE_LABELS = {
     "amount_scope3": "Scope 3 Energy (MJ/$)",
     "electricity_share": "Electricity Share (%)",
     "global_export_value": "Global Export Value ($)",
-    "export_cagr_2012_2023": "Export CAGR 2012-2023",
+    "export_cagr_2012_2023": "Export CAGR 2012-2024",
     "n_exporting_countries": "# Exporting Countries",
     "rca_mar": "Morocco RCA",
     "density_mar": "Morocco Density",
@@ -66,26 +84,6 @@ def load_data():
     return df
 
 
-@st.cache_data
-def get_hs2_color_map():
-    """Build a fixed HS2 chapter name → color map from the full product universe.
-
-    Colors are assigned deterministically by sorted hs2_code so every page and
-    every filter state always renders the same chapter in the same color.
-    """
-    df = pd.read_parquet(MASTER_DATA)
-    chapters = (
-        df[["hs2_code", "hs2_name"]]
-        .drop_duplicates()
-        .sort_values("hs2_code")
-        .reset_index(drop=True)
-    )
-    return {
-        row["hs2_name"]: GL_PALETTE_EXT[i % len(GL_PALETTE_EXT)]
-        for i, row in chapters.iterrows()
-    }
-
-
 # ============================================================
 # PLOTLY THEME
 # ============================================================
@@ -110,43 +108,37 @@ GL_TEMPLATE = get_gl_template()
 # ============================================================
 # CHART HELPERS
 # ============================================================
-def make_treemap(df, value_col, title="", color_map=None, size_by="value"):
+def make_treemap(df, value_col, label_col="hs2_name", color_col="hs2_code", title="",
+                 color_map=None):
     """Create an interactive Plotly treemap at HS2 level.
 
     Args:
-        value_col: Column to aggregate (sum) — used for hover info.
-        color_map: Dict mapping hs2_name → color hex. Defaults to get_hs2_color_map()
-                   for consistent colors across pages.
-        size_by: "value" = size tiles by sum of value_col (default),
-                 "count" = size tiles by number of HS6 products in each chapter.
+        color_map: Optional dict mapping hs2_name → color hex for consistent coloring
+                   across multiple treemaps.
     """
     agg = df.groupby(["hs2_code", "hs2_name"]).agg(
         value=(value_col, "sum"),
         n_products=("hs_product_code", "count"),
     ).reset_index()
+    agg = agg.sort_values("value", ascending=False)
 
-    if color_map is None:
-        color_map = get_hs2_color_map()
-
-    treemap_values = "n_products" if size_by == "count" else "value"
+    color_kwargs = {}
+    if color_map:
+        color_kwargs["color_discrete_map"] = color_map
+    else:
+        color_kwargs["color_discrete_sequence"] = GL_PALETTE_EXT
 
     fig = px.treemap(
         agg,
         path=["hs2_name"],
-        values=treemap_values,
+        values="value",
         color="hs2_name",
-        color_discrete_map=color_map,
+        **color_kwargs,
         title=title,
-        custom_data=["hs2_code", "n_products", "value"],
+        custom_data=["hs2_code", "n_products"],
     )
     fig.update_traces(
-        hovertemplate=(
-            "<b>%{label}</b><br>"
-            "HS2: %{customdata[0]}<br>"
-            "Products: %{customdata[1]}<br>"
-            "Value: %{customdata[2]:,.0f}"
-            "<extra></extra>"
-        ),
+        hovertemplate="<b>%{label}</b><br>Value: %{value:,.0f}<br>HS2: %{customdata[0]}<br>Products: %{customdata[1]}<extra></extra>",
         textinfo="label+percent root",
     )
     fig.update_layout(
@@ -237,6 +229,57 @@ def weighted_score(df, components, weights):
     return score / total_weight
 
 
+def _normalize_percentile(value):
+    """Accept either 0-1 or 0-100 percentile inputs and return 0-1."""
+    return value / 100 if value > 1 else value
+
+
+def _energy_threshold(series, percentile):
+    """Compute an energy threshold on observed values; 0th percentile is 0.
+
+    Missing energy values mean "no USEEIO mapping", not observed zero use. We
+    therefore compute positive thresholds on non-missing values, but treat
+    missing values as zero in pass/fail masks. At the 0th percentile, the
+    threshold is forced to zero so missing-energy products are visible.
+    """
+    pct = _normalize_percentile(percentile)
+    if pct <= 0:
+        return 0.0
+    observed = series.dropna()
+    if observed.empty:
+        return 0.0
+    return float(observed.quantile(pct))
+
+
+def get_stage1_thresholds(
+    df_all,
+    energy_percentile=DEFAULT_ENERGY_PERCENTILE,
+    elec_percentile=DEFAULT_ELEC_PERCENTILE,
+    trade_percentile=DEFAULT_TRADE_PERCENTILE,
+):
+    """Return canonical Stage 1 threshold values."""
+    return {
+        "energy_percentile": _normalize_percentile(energy_percentile),
+        "elec_percentile": _normalize_percentile(elec_percentile),
+        "trade_percentile": _normalize_percentile(trade_percentile),
+        "energy_threshold": _energy_threshold(df_all["amount_carriers"], energy_percentile),
+        "elec_threshold": _energy_threshold(df_all["amount_electric_energy"], elec_percentile),
+        "trade_threshold": float(df_all["global_export_value"].quantile(_normalize_percentile(trade_percentile))),
+        "missing_energy_policy": "thresholds_on_observed_values__missing_as_zero_for_pass_fail",
+    }
+
+
+def build_stage1_energy_mask(df, thresholds, filter_logic=DEFAULT_FILTER_LOGIC):
+    """Build the canonical Stage 1 energy pass/fail mask."""
+    carriers = df["amount_carriers"].fillna(0)
+    elec = df["amount_electric_energy"].fillna(0)
+    carrier_pass = carriers >= thresholds["energy_threshold"]
+    elec_pass = elec >= thresholds["elec_threshold"]
+    if str(filter_logic).upper() == "AND":
+        return carrier_pass & elec_pass
+    return carrier_pass | elec_pass
+
+
 # ============================================================
 # DOWNLOAD HELPER
 # ============================================================
@@ -266,39 +309,47 @@ def format_dollars(value):
         return f"${value:,.0f}"
 
 
+def inject_custom_css():
+    """Inject custom CSS for typography and layout consistency."""
+    st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@300;400;600;700&display=swap');
+    html, body, [class*="css"], .stMarkdown, p, label, .stSelectbox, .stRadio {
+        font-family: 'Source Sans Pro', sans-serif !important;
+        line-height: 1.45;
+    }
+    h1 { font-size: 1.8rem; font-weight: 700; letter-spacing: -0.01em; }
+    h2 { font-size: 1.35rem; font-weight: 600; }
+    h3 { font-size: 1.1rem; font-weight: 600; }
+    .stMarkdown p { font-size: 15px; line-height: 1.5; }
+    .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
+    </style>
+    """, unsafe_allow_html=True)
+
+
 # ============================================================
 # SCENARIO DEFINITIONS & SCORING
 # ============================================================
 SCENARIO_DEFS = {
     "No Prior": {
-        "weights": {"fuel": 25, "elec": 25, "vuln": 25, "cbam": 25, "growth": 0},
+        "weights": {"fuel": 0, "elec": 33, "vuln": 33, "cbam": 33, "growth": 0},
         "pre_filter": None,
-        "desc": "Equal weight baseline — no assumption about which driver matters most.",
+        "desc": "Equal weight on electricity intensity, incumbent vulnerability, and CBAM exposure. No prior assumption about which relocation driver dominates.",
     },
-    "Electricity Intensity": {
+    "Electricity Cost": {
         "weights": {"fuel": 0, "elec": 100, "vuln": 0, "cbam": 0, "growth": 0},
         "pre_filter": None,
-        "desc": "Pure electricity cost mechanism — industries with highest electricity share of costs.",
+        "desc": "Pure electricity cost mechanism. Selects industries where electricity is the largest share of production costs.",
     },
-    "Fuel + Electricity": {
-        "weights": {"fuel": 50, "elec": 50, "vuln": 0, "cbam": 0, "growth": 0},
-        "pre_filter": None,
-        "desc": "Both fuel and electricity intensity — captures current and emerging electrification.",
-    },
-    "CBAM Dominant": {
+    "Carbon Regulation": {
         "weights": {"fuel": 0, "elec": 0, "vuln": 0, "cbam": 100, "growth": 0},
         "pre_filter": "cbam",
-        "desc": "EU regulatory pressure — pre-filtered to CBAM-covered products only.",
+        "desc": "EU carbon border pressure. Pre-filtered to CBAM-covered products, ranked by combined energy intensity and EU market exposure.",
     },
     "Disruption Opportunity": {
         "weights": {"fuel": 0, "elec": 0, "vuln": 100, "cbam": 0, "growth": 0},
         "pre_filter": None,
-        "desc": "Incumbent vulnerability — where current exporters are most energy-deficit.",
-    },
-    "Market Growth": {
-        "weights": {"fuel": 0, "elec": 0, "vuln": 0, "cbam": 0, "growth": 100},
-        "pre_filter": None,
-        "desc": "Fastest-growing global trade — expanding markets with easier entry.",
+        "desc": "Disruption opportunity. Where current top exporters are most energy-deficit and therefore most vulnerable to powershoring competition.",
     },
 }
 
@@ -306,22 +357,136 @@ DEFAULT_FEAS_WEIGHTS = {"rca": 20, "density": 50, "hhi": 15, "distance": 15}
 DEFAULT_ATTR_WEIGHTS = {"market_size": 15, "growth": 15, "cog": 30, "pci": 30, "spillover": 10}
 
 
-def run_scenario_scoring(df, likelihood_weights, feas_weights, attr_weights):
-    """Run full pipeline: likelihood → top 50% filter → F/A scoring.
+# ============================================================
+# DEFAULT STAGE 1 EXCLUSIONS (single source of truth)
+# ============================================================
+# Imported by both the interactive app and the batch chart pipeline so that
+# the published figures, the chapter, and the live tool always agree on what
+# the candidate universe is.
+#
+# Imported by:
+#   - app/pages/1_Filtering.py    (sidebar toggle exposes legacy fallback)
+#   - app/pages/5_Summary.py      (via _default_stage1_filter)
+#   - 02_Code/scenario_analysis_simplified.py
+#   - 02_Code/robustness_analysis.py
+
+# Legacy default: HS 01-27 (non-manufacturing + extractive) -- preserved so
+# old analyses can be reproduced exactly via the sidebar toggle.
+EXCLUDE_HS2_LEGACY = list(range(1, 28))  # chapters 1..27 inclusive
+
+# Current default: legacy plus chapters whose location is not driven by
+# electricity cost.
+#   HS 68 -- Articles of stone, cement, asbestos: heavy and local; energy is
+#            upstream in already-excluded cement (HS 25).
+#   HS 71 -- Precious stones and metals: location driven by vault security,
+#            refining licenses, and craft skills, not industrial electricity.
+EXCLUDE_HS2_DEFAULT = EXCLUDE_HS2_LEGACY + [68, 71]
+
+# Raw agricultural fibers at the HS4 heading level. The HS classification
+# puts these in textile chapters, but they are agricultural commodities --
+# location is determined by climate and biology, not by industrial cost.
+#   5001 silk-worm cocoons; 5101 wool, not carded or combed;
+#   5201 cotton, not carded or combed; 5301 raw or retted flax.
+EXCLUDE_HS4_RAW_FIBERS = [5001, 5101, 5201, 5301]
+
+
+def apply_default_exclusions(df, use_legacy=False):
+    """Apply Stage 1 chapter and raw-fiber exclusions.
 
     Args:
-        df: Filtered product DataFrame (Stage 1 output).
-        likelihood_weights: Dict with keys fuel, elec, vuln, cbam, growth.
-        feas_weights: Dict with keys rca, density, hhi, distance.
-        attr_weights: Dict with keys market_size, growth, cog, pci, spillover.
+        df: DataFrame with `hs2_code` and `hs4_code` columns.
+        use_legacy: If True, exclude only HS 01-27 (legacy behaviour, for
+            reproducing pre-2026-04 analyses). If False (default), also
+            exclude HS 68, HS 71, and raw fiber HS4 headings 5001/5101/5201/5301.
 
     Returns:
-        Scored DataFrame with likelihood, feasibility, attractiveness, lhf, sb scores
-        and all component percentiles.
+        Filtered DataFrame copy.
     """
+    out = df.copy()
+    out["hs2_code"] = out["hs2_code"].astype(int)
+    out["hs4_code"] = out["hs4_code"].astype(int)
+
+    excluded_hs2 = EXCLUDE_HS2_LEGACY if use_legacy else EXCLUDE_HS2_DEFAULT
+    out = out[~out["hs2_code"].isin(excluded_hs2)]
+
+    if not use_legacy:
+        out = out[~out["hs4_code"].isin(EXCLUDE_HS4_RAW_FIBERS)]
+
+    return out
+
+
+def apply_stage1_filter(
+    df_all,
+    energy_percentile=DEFAULT_ENERGY_PERCENTILE,
+    elec_percentile=DEFAULT_ELEC_PERCENTILE,
+    trade_percentile=DEFAULT_TRADE_PERCENTILE,
+    filter_logic=DEFAULT_FILTER_LOGIC,
+    use_legacy=False,
+    cbam_only=False,
+    green_only=False,
+    green_topics=None,
+    rca_threshold=0.0,
+    return_metadata=False,
+):
+    """Apply the canonical Stage 1 candidate-universe filter.
+
+    Thresholds are computed on the full universe. Positive energy thresholds
+    are computed on observed USEEIO values, while pass/fail masks use missing
+    energy as zero. This keeps 0th-percentile controls inclusive without
+    lowering non-zero energy thresholds because of unmapped products.
+    """
+    thresholds = get_stage1_thresholds(
+        df_all,
+        energy_percentile=energy_percentile,
+        elec_percentile=elec_percentile,
+        trade_percentile=trade_percentile,
+    )
+
+    filtered = apply_default_exclusions(df_all, use_legacy=use_legacy)
+    energy_mask = build_stage1_energy_mask(filtered, thresholds, filter_logic=filter_logic)
+    trade_mask = filtered["global_export_value"] >= thresholds["trade_threshold"]
+    filtered = filtered[energy_mask & trade_mask].copy()
+
+    filter_parts = []
+    if use_legacy:
+        filter_parts.append("Legacy exclusion (HS 01-27)")
+    else:
+        filter_parts.append("Default exclusion (HS 01-27, 68, 71 + raw fibers)")
+    filter_parts.append(
+        f"Energy >= {thresholds['energy_percentile']*100:.0f}th pct "
+        f"{str(filter_logic).upper()} Electricity >= {thresholds['elec_percentile']*100:.0f}th pct"
+    )
+    filter_parts.append(f"Trade >= {format_dollars(thresholds['trade_threshold'])} ({thresholds['trade_percentile']*100:.0f}th pct)")
+
+    if cbam_only:
+        filtered = filtered[filtered["cbam_flag"] == 1].copy()
+        filter_parts.append("CBAM only")
+    if green_only and green_topics:
+        filtered = filtered[filtered["green_supply_chain_flag"] == 1].copy()
+        filtered = filtered[filtered["green_topic"].apply(lambda x: any(t in str(x) for t in green_topics))].copy()
+        filter_parts.append(f"Green SC: {', '.join(green_topics)}")
+    if rca_threshold and rca_threshold > 0:
+        filtered = filtered[filtered["rca_mar"] >= rca_threshold].copy()
+        filter_parts.append(f"Morocco RCA >= {rca_threshold}")
+
+    metadata = {
+        "methodology_version": METHODOLOGY_VERSION,
+        "thresholds": thresholds,
+        "filter_logic": str(filter_logic).upper(),
+        "use_legacy_exclusions": bool(use_legacy),
+        "description": " | ".join(filter_parts),
+        "n_products": int(len(filtered)),
+        "global_export_value": float(filtered["global_export_value"].sum()),
+    }
+    if return_metadata:
+        return filtered, metadata
+    return filtered
+
+
+def add_likelihood_scores(df, likelihood_weights):
+    """Add scenario-specific likelihood score and component percentiles."""
     d = df.copy()
 
-    # Likelihood components
     comps = {}
     comps["fuel"] = percentile_rank(d["amount_fuel_energy"].fillna(0))
     comps["elec"] = percentile_rank(d["amount_electric_energy"].fillna(0))
@@ -344,36 +509,91 @@ def run_scenario_scoring(df, likelihood_weights, feas_weights, attr_weights):
         total = sum(active.values())
         d["likelihood_score"] = sum(active[k] * comps[k] for k in active) / total
 
+    for k, v in comps.items():
+        d[f"like_{k}"] = v
+
+    return d
+
+
+def add_feasibility_attractiveness_scores(df, feas_weights, attr_weights, reference_df=None):
+    """Add F/A scores using a fixed reference universe for percentile ranks.
+
+    For cross-scenario work, `reference_df` should be the full Stage 1
+    candidate pool. Scenario-specific likelihood filters then gate products,
+    but F/A ranks stay comparable across scenarios.
+    """
+    out = df.copy()
+    ref = out if reference_df is None else reference_df.copy()
+
+    # If a caller passes rows outside the reference universe, include them so
+    # reindexing below cannot silently create NaN ranks.
+    missing_idx = out.index.difference(ref.index)
+    if len(missing_idx) > 0:
+        ref = pd.concat([ref, out.loc[missing_idx]], axis=0)
+
+    fc = {}
+    fc["rca"] = percentile_rank(ref["rca_mar"].fillna(0))
+    fc["density"] = percentile_rank(ref["density_mar"].fillna(0))
+    fc["hhi"] = percentile_rank(ref["inv_hhi"].fillna(0))
+    fc["distance"] = percentile_rank(-ref["product_distance"].fillna(ref["product_distance"].median()))
+
+    ftotal = sum(feas_weights.values()) or 1
+    for k, v in fc.items():
+        out[f"feas_{k}"] = v.reindex(out.index)
+    out["feasibility_score"] = sum(feas_weights[k] * out[f"feas_{k}"] for k in feas_weights) / ftotal
+
+    ac = {}
+    ac["market_size"] = percentile_rank(ref["global_export_value"].fillna(0))
+    ac["growth"] = percentile_rank(ref["export_cagr_2012_2023"].fillna(0))
+    ac["cog"] = percentile_rank(ref["cog_mar"].fillna(0))
+    ac["pci"] = percentile_rank(ref["pci"].fillna(0))
+    ac["spillover"] = percentile_rank(ref["weighted_degree"].fillna(ref["weighted_degree"].median()))
+
+    atotal = sum(attr_weights.values()) or 1
+    for k, v in ac.items():
+        out[f"attr_{k}"] = v.reindex(out.index)
+    out["attractiveness_score"] = sum(attr_weights[k] * out[f"attr_{k}"] for k in attr_weights) / atotal
+
+    # Backward-compatible aliases for the combined app page/table.
+    out["rca_pctile"] = out["feas_rca"]
+    out["density_pctile"] = out["feas_density"]
+    out["hhi_pctile"] = out["feas_hhi"]
+    out["distance_pctile"] = out["feas_distance"]
+    out["market_size_pctile"] = out["attr_market_size"]
+    out["attr_growth_pctile"] = out["attr_growth"]
+    out["cog_pctile"] = out["attr_cog"]
+    out["pci_pctile"] = out["attr_pci"]
+    out["spillover_pctile"] = out["attr_spillover"]
+
+    return out
+
+
+def run_scenario_scoring(df, likelihood_weights, feas_weights, attr_weights, fa_reference_df=None):
+    """Run full pipeline: likelihood → top 50% filter → F/A scoring.
+
+    Args:
+        df: Filtered product DataFrame (Stage 1 output).
+        likelihood_weights: Dict with keys fuel, elec, vuln, cbam, growth.
+        feas_weights: Dict with keys rca, density, hhi, distance.
+        attr_weights: Dict with keys market_size, growth, cog, pci, spillover.
+        fa_reference_df: Universe used for F/A percentile ranks. Pass the full
+            Stage 1 pool for cross-scenario comparability.
+
+    Returns:
+        Scored DataFrame with likelihood, feasibility, attractiveness scores
+        and all component percentiles.
+    """
+    d = add_likelihood_scores(df, likelihood_weights)
+    d = add_feasibility_attractiveness_scores(
+        d,
+        feas_weights,
+        attr_weights,
+        reference_df=fa_reference_df if fa_reference_df is not None else d,
+    )
+
     # Top 50% by likelihood
     cutoff = d["likelihood_score"].quantile(0.5)
     sel = d[d["likelihood_score"] >= cutoff].copy()
-
-    # Feasibility
-    fc = {}
-    fc["rca"] = percentile_rank(sel["rca_mar"].fillna(0))
-    fc["density"] = percentile_rank(sel["density_mar"].fillna(0))
-    fc["hhi"] = percentile_rank(sel["inv_hhi"].fillna(0))
-    fc["distance"] = percentile_rank(-sel["product_distance"].fillna(sel["product_distance"].median()))
-    ftotal = sum(feas_weights.values())
-    sel["feasibility_score"] = sum(feas_weights[k] * fc[k] for k in feas_weights) / ftotal
-    for k, v in fc.items():
-        sel[f"feas_{k}"] = v
-
-    # Attractiveness
-    ac = {}
-    ac["market_size"] = percentile_rank(sel["global_export_value"].fillna(0))
-    ac["growth"] = percentile_rank(sel["export_cagr_2012_2023"].fillna(0))
-    ac["cog"] = percentile_rank(sel["cog_mar"].fillna(0))
-    ac["pci"] = percentile_rank(sel["pci"].fillna(0))
-    ac["spillover"] = percentile_rank(sel["weighted_degree"].fillna(sel["weighted_degree"].median()))
-    atotal = sum(attr_weights.values())
-    sel["attractiveness_score"] = sum(attr_weights[k] * ac[k] for k in attr_weights) / atotal
-    for k, v in ac.items():
-        sel[f"attr_{k}"] = v
-
-    # Composite score: 60% Feasibility + 40% Attractiveness
-    sel["lhf_score"] = 0.60 * sel["feasibility_score"] + 0.40 * sel["attractiveness_score"]
-
     return sel
 
 
@@ -385,6 +605,38 @@ def _load_hs4_descriptions():
     return {}
 
 _HS4_DESC_LOOKUP = _load_hs4_descriptions()
+
+
+# ============================================================
+# DEFAULT STAGE 1 FILTER
+# ============================================================
+def _default_stage1_filter(df_all, use_legacy=False):
+    """Apply default Stage 1 filter to the full dataset.
+
+    Thresholds: energy >= 75th pct OR electricity >= 50th pct, trade >= 15th pct.
+    Exclusions are applied via `apply_default_exclusions`. By default this
+    excludes HS 01-27 plus HS 68, HS 71, and raw fiber HS4 headings; pass
+    `use_legacy=True` to fall back to HS 01-27 only.
+
+    Returns raw filtered DataFrame (not scored).
+    """
+    return apply_stage1_filter(df_all, use_legacy=use_legacy)
+
+
+def run_default_scenario(df_all):
+    """Run No Prior scenario with default thresholds. Returns HS4-aggregated top 15."""
+    filtered = _default_stage1_filter(df_all)
+    no_prior_weights = SCENARIO_DEFS["No Prior"]["weights"]
+    scored = run_scenario_scoring(
+        filtered,
+        no_prior_weights,
+        DEFAULT_FEAS_WEIGHTS,
+        DEFAULT_ATTR_WEIGHTS,
+        fa_reference_df=filtered,
+    )
+    scored["composite_score"] = 0.60 * scored["feasibility_score"] + 0.40 * scored["attractiveness_score"]
+    hs4 = aggregate_to_hs4(scored)
+    return hs4.nlargest(15, "composite_score").reset_index(drop=True)
 
 
 def aggregate_to_hs4(sel):
@@ -406,8 +658,11 @@ def aggregate_to_hs4(sel):
         desc = _HS4_DESC_LOOKUP.get(hs4, "")
         if not desc:
             desc = f"{hs2n} ({hs4})"
+        name_short = desc[:40] if desc else f"{hs2n} ({hs4})"
+        atlas_sect = g["atlas_section"].iloc[0] if "atlas_section" in g.columns else hs2n
         r = {
-            "hs4_code": hs4, "hs2_name": hs2n, "description": desc,
+            "hs4_code": hs4, "hs2_name": hs2n, "atlas_section": atlas_sect,
+            "description": desc, "name_short": name_short,
             "n_products": len(g), "global_export_value": g["global_export_value"].sum(),
             "rca_mar": g["rca_mar"].mean(), "density_mar": g["density_mar"].mean(),
             "elec_int": _tw_mean(g, "amount_electric_energy"),
