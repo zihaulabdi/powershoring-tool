@@ -12,21 +12,23 @@ import ui  # noqa: E402
 import utils as U  # noqa: E402
 
 ui.page_header(
-    "Tools · Compare",
-    "Compare two shortlists",
+    "Tools",
+    "Compare",
     lede=(
-        "Put any two saved shortlists side by side to see what they share and where they differ. "
-        "Save shortlists from <b>2 · Score and rank</b> or <b>3 · Scenarios</b> using the button in the sidebar."
+        "Compare two saved results side by side. Save results with the button in the sidebar of "
+        "<b>2 · Score and rank</b> or <b>3 · Scenarios</b>."
     ),
 )
 
 
-def add_default_theories():
-    """Save the Top 30 products of each theory under the default assumptions."""
-    results = ui.scenario_results(stage1=dict(ui.STAGE1_DEFAULTS))
+def add_theory_shortlists():
+    """Save each theory's Top N under the user's current settings."""
+    r = ui.current_ranking()
+    results = ui.scenario_results(ranking=r)
+    stamp = f"{r['feas_pct']}F/{100 - r['feas_pct']}A"
     for s, res in results.items():
-        ui.save_shortlist(f"{s} · top 30 (defaults)", res["selected"].nlargest(30, "composite_score"),
-                          f"{s} theory · default assumptions · top 30 products")
+        ui.save_shortlist(f"{s} · top {r['top_n']} · {stamp}", res["selected"].nlargest(r["top_n"], "composite_score"),
+                          f"{s} theory · current settings · top {r['top_n']} products")
 
 
 saved = ui.saved_shortlists()
@@ -37,11 +39,11 @@ saved = ui.saved_shortlists()
 if len(saved) < 2:
     ui.note(
         f"You have saved <b>{len(saved)}</b> shortlist{'s' if len(saved) != 1 else ''}. Two are needed. "
-        "Either save your own from steps 2 and 3, or start from the four theory shortlists under the "
-        "default assumptions.", accent=True,
+        "Save them from steps 2 and 3, or add the four theory shortlists produced by your current settings.",
+        accent=True,
     )
-    if st.button("Add the four default theory shortlists", type="primary"):
-        add_default_theories()
+    if st.button("Add the four theory shortlists (current settings)", type="primary"):
+        add_theory_shortlists()
         st.rerun()
     st.stop()
 
@@ -57,8 +59,8 @@ level_label = sb.radio("Compare at the level of", ["Products (HS6)", "Industries
 level = "HS4" if "HS4" in level_label else "HS6"
 
 sb.header("Manage")
-if sb.button("Add the four default theory shortlists"):
-    add_default_theories()
+if sb.button("Add the four theory shortlists (current settings)"):
+    add_theory_shortlists()
     st.rerun()
 to_drop = sb.selectbox("Remove a shortlist", ["—"] + names, key="cmp_drop")
 if to_drop != "—" and sb.button("Remove"):

@@ -29,10 +29,9 @@ ui.apply_theme()
 st.session_state.setdefault("saved_scenarios", {})
 st.session_state.setdefault("_store", {})
 
-# Page order: the answer first, then the three analysis steps, then tools.
+# Page order: introduction, the three simulation steps, then the comparison tool.
 pages = [
-    st.Page("pages/0_Overview.py", title="Overview", url_path="overview", default=True),
-    st.Page("pages/5_Summary.py", title="Shortlist", url_path="shortlist"),
+    st.Page("pages/0_Overview.py", title="Introduction", url_path="introduction", default=True),
     st.Page("pages/1_Filtering.py", title="1 · Candidate pool", url_path="filter"),
     st.Page("pages/2_Likelihood_Prioritization.py", title="2 · Score and rank", url_path="score"),
     st.Page("pages/3_Scenarios.py", title="3 · Scenarios", url_path="scenarios"),

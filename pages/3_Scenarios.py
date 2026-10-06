@@ -65,18 +65,15 @@ if sb.button("Save its shortlist", type="primary"):
 # HEADER
 # ============================================================
 ui.page_header(
-    "Step 3 of 3 · Scenarios",
-    "Which candidates hold up under every theory?",
+    "Step 3 of 3",
+    "Scenarios",
     lede=(
-        f"Each theory produces its own Top {top_n}. An entry that appears in several of them does not "
-        "depend on one contested assumption about why industries relocate. "
-        f"Here, <b>{len(robust)} {code_word}</b> appear in at least {robust_min} of the "
-        f"{len(active)} shortlists."
+        f"Step 2 is run once for each relocation theory, giving one Top {top_n} per theory. "
+        f"{code_word.capitalize()} that appear in at least {robust_min} of these lists are marked as robust. "
+        f"With your settings, <b>{len(robust)} {code_word}</b> are robust."
     ),
 )
-if not (ui.stage1_is_default() and ui.ranking_is_default(ranking)):
-    ui.note("These results use your own settings from step 1 or the sidebar, so they may differ from the "
-            "Shortlist page, which always uses the defaults.", accent=True)
+ui.note(ui.settings_summary(ranking), accent=True)
 
 k1, k2, k3, k4 = st.columns(4)
 k1.metric(f"{code_word.capitalize()} shortlisted", f"{len(table)}")

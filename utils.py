@@ -335,13 +335,13 @@ SCENARIO_DEFS = {
         "weights": {"fuel": 0, "elec": 33, "vuln": 33, "cbam": 33, "growth": 0},
         "pre_filter": None,
         "likelihood_top_share": 0.5,
-        "desc": "Equal weight on electricity intensity, incumbent vulnerability, and CBAM exposure. No prior assumption about which relocation driver dominates.",
+        "desc": "Gives equal weight to electricity intensity, incumbent vulnerability and CBAM exposure.",
     },
     "Electricity Cost": {
         "weights": {"fuel": 0, "elec": 100, "vuln": 0, "cbam": 0, "growth": 0},
         "pre_filter": None,
         "likelihood_top_share": 0.5,
-        "desc": "Pure electricity cost mechanism. Selects industries where electricity is the largest share of production costs.",
+        "desc": "Ranks products by electricity use per dollar of output.",
     },
     "Carbon Regulation": {
         "weights": {"fuel": 0, "elec": 0, "vuln": 0, "cbam": 100, "growth": 0},
@@ -350,13 +350,13 @@ SCENARIO_DEFS = {
         # again by likelihood left exactly 30 HS4 codes (so the Top 30 was not
         # a ranking) and dropped every fertilizer product (low EU import share).
         "likelihood_top_share": 1.0,
-        "desc": "EU carbon border pressure. All CBAM-covered products in the candidate pool are ranked on feasibility and attractiveness.",
+        "desc": "Limits the pool to products covered by the EU carbon border tax (CBAM).",
     },
     "Disruption Opportunity": {
         "weights": {"fuel": 0, "elec": 0, "vuln": 100, "cbam": 0, "growth": 0},
         "pre_filter": None,
         "likelihood_top_share": 0.5,
-        "desc": "Disruption opportunity. Where current top exporters are most energy-deficit and therefore most vulnerable to powershoring competition.",
+        "desc": "Ranks products by how energy-poor the current leading exporters are.",
     },
 }
 

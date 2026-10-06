@@ -76,17 +76,6 @@ else:
     kept = scored[scored["likelihood_score"] >= cutoff].copy()
 
 
-def quadrant(f, a):
-    if f >= 50 and a >= 50:
-        return "Top priority"
-    if a >= 50:
-        return "Strategic bet"
-    if f >= 50:
-        return "Low-hanging fruit"
-    return "Deprioritise"
-
-
-kept["quadrant"] = [quadrant(f, a) for f, a in zip(kept["feasibility_score"], kept["attractiveness_score"])]
 kept["hs6"] = kept["hs_product_code"].astype(str).str.zfill(6)
 kept["hs4"] = kept["hs6"].str[:4]
 kept["industry"] = kept["hs4"].map(lambda c: ui.short_label(U._HS4_DESC_LOOKUP.get(c, c), 45))
@@ -106,13 +95,12 @@ if sb.button("Save for comparison", type="primary"):
 # HEADER
 # ============================================================
 ui.page_header(
-    "Step 2 of 3 · Score and rank",
-    "Which candidates are likely to move, and which suit Morocco?",
+    "Step 2 of 3",
+    "Score and rank",
     lede=(
-        "Ranking happens in two passes. First, a <b>likelihood score</b> measures how strongly each product "
-        "is pushed to relocate, according to the theory chosen in the sidebar; the least likely are dropped. "
-        "Second, the products that remain are ranked on <b>feasibility</b> (is Morocco ready?) and "
-        "<b>attractiveness</b> (is the market worth it?)."
+        "Each product in the candidate pool gets a <b>likelihood score</b> based on the relocation theory "
+        "chosen in the sidebar. The least likely products are dropped. The rest are ranked on "
+        "<b>feasibility</b> (Morocco's readiness to produce them) and <b>attractiveness</b> (the value of the market)."
     ),
 )
 
@@ -137,7 +125,7 @@ ui.chart_header(
     "Feasibility against attractiveness",
     f"Each dot is an HS6 product. <b style='color:{ui.ACCENT}'>Orange</b>: the Top {top_n} by composite score. "
     f"<b>Black</b>: other products kept by likelihood. <span style='color:{ui.MUTED}'>Grey</span>: dropped by "
-    "likelihood. Dotted lines mark the 50th percentile on each axis. Dot size reflects world exports.",
+    "likelihood. Dot size reflects world exports.",
 )
 plot_df = scored.copy()
 plot_df["status"] = "Dropped by likelihood"
@@ -164,13 +152,6 @@ for status, sty in styles.items():
                        "Attractiveness %{y:.0f}<br>Likelihood %{customdata[2]:.0f}<br>"
                        "World exports $%{customdata[3]:.1f}B<extra></extra>"),
     ))
-for v in (50,):
-    fig.add_vline(x=v, line_dash="dot", line_color=ui.RULE)
-    fig.add_hline(y=v, line_dash="dot", line_color=ui.RULE)
-for x, y, t, xa, ya in [(99, 99, "Top priorities", "right", "top"), (1, 99, "Strategic bets", "left", "top"),
-                        (99, 1, "Low-hanging fruit", "right", "bottom"), (1, 1, "Deprioritise", "left", "bottom")]:
-    fig.add_annotation(x=x, y=y, text=t, showarrow=False, xanchor=xa, yanchor=ya,
-                       font=dict(family="JetBrains Mono, monospace", size=11, color=ui.MUTED))
 fig.update_layout(
     height=560, xaxis=dict(title="Feasibility (Morocco's readiness, percentile)", range=[0, 100]),
     yaxis=dict(title="Attractiveness (value of the market, percentile)", range=[0, 100],
@@ -191,7 +172,7 @@ t.index = t.index + 1
 t.index.name = "Rank"
 st.dataframe(
     t[["hs6", "product", "hs2_name", "composite_score", "feasibility_score",
-       "attractiveness_score", "quadrant", "global_export_value"]],
+       "attractiveness_score", "global_export_value"]],
     column_config={
         "hs6": st.column_config.TextColumn("HS6", width="small"),
         "product": st.column_config.TextColumn("Product", width="medium"),
@@ -200,22 +181,14 @@ st.dataframe(
         "composite_score": st.column_config.ProgressColumn("Composite", min_value=0, max_value=100, format="%.0f"),
         "feasibility_score": st.column_config.NumberColumn("Feasibility", format="%.0f", width="small"),
         "attractiveness_score": st.column_config.NumberColumn("Attractiveness", format="%.0f", width="small"),
-        "quadrant": st.column_config.TextColumn("Quadrant"),
         "global_export_value": st.column_config.NumberColumn("World exports ($)", format="compact"),
     },
     width="stretch", height=min(36 * len(t) + 40, 640),
 )
 
-left, right = st.columns([1, 1])
-with left:
-    ui.chart_header(f"Top {top_n} by sector", "Number of products in each HS2 chapter.")
-    by_sector = top.groupby("hs2_name").size().sort_values(ascending=False)
-    ui.plot(ui.hbar(by_sector.index, by_sector.values))
-with right:
-    ui.chart_header(f"Top {top_n} by quadrant", "Quadrants split each axis at the 50th percentile.")
-    order = ["Top priority", "Strategic bet", "Low-hanging fruit", "Deprioritise"]
-    q = top["quadrant"].value_counts().reindex(order).fillna(0)
-    ui.plot(ui.hbar(q.index, q.values, highlight=[i == 0 for i in range(len(q))]))
+ui.chart_header(f"Top {top_n} by sector", "Number of products in each HS2 chapter.")
+by_sector = top.groupby("hs2_name").size().sort_values(ascending=False)
+ui.plot(ui.hbar(by_sector.index, by_sector.values))
 
 # ============================================================
 # COMPONENT DETAIL

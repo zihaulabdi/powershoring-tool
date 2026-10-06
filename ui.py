@@ -88,7 +88,7 @@ h3 {{ font-size: 1.35rem !important; }}
 .ecu-step .n {{ font-family: 'JetBrains Mono', monospace; color: {ACCENT}; font-size: 13px; letter-spacing: 0.08em; }}
 .ecu-step .h {{ font-family: 'Crimson Pro', Georgia, serif; font-size: 22px; font-weight: 600; margin: 2px 0 4px 0; }}
 .ecu-step .b {{ color: {MUTED}; font-size: 15px; line-height: 1.5; }}
-.ecu-step .k {{ font-family: 'Crimson Pro', Georgia, serif; font-size: 21px; font-weight: 600; color: {ACCENT}; margin-top: 8px; }}
+.ecu-step .k {{ font-family: 'JetBrains Mono', monospace; font-size: 12px; letter-spacing: 0.06em; color: {ACCENT}; margin-top: 8px; }}
 
 /* Metrics */
 [data-testid="stMetricLabel"] p {{
@@ -232,6 +232,8 @@ def reset_settings(prefix):
 
 
 # ----- Stage 1 (candidate pool) -----
+# Starting positions of the controls. They are not a recommended setting;
+# every result in the tool follows from whatever the user chooses.
 STAGE1_DEFAULTS = {
     "s1_energy": 75, "s1_elec": 50, "s1_trade": 15, "s1_logic": "Either threshold (OR)",
     "s1_legacy": False, "s1_cbam": False, "s1_green": False, "s1_topics": [], "s1_rca": 0.0,
@@ -241,10 +243,6 @@ STAGE1_DEFAULTS = {
 def stage1_settings():
     s = {k: _store().get(k, v) for k, v in STAGE1_DEFAULTS.items()}
     return s
-
-
-def stage1_is_default():
-    return stage1_settings() == STAGE1_DEFAULTS
 
 
 @st.cache_data(show_spinner=False)
@@ -306,15 +304,41 @@ def ranking_controls():
     if sum(feas_w.values()) == 0 or sum(attr_w.values()) == 0:
         st.sidebar.error("Give at least one feasibility and one attractiveness component a weight above 0.")
         st.stop()
-    if st.sidebar.button("Reset ranking to defaults", key="reset_rank"):
+    if st.sidebar.button("Reset ranking controls", key="reset_rank"):
         reset_settings("r_")
         st.rerun()
     return {"feas_pct": feas_pct, "top_n": top_n, "feas_w": feas_w, "attr_w": attr_w}
 
 
-def ranking_is_default(r):
-    return (r["feas_pct"] == 60 and r["top_n"] == 30
-            and r["feas_w"] == U.DEFAULT_FEAS_WEIGHTS and r["attr_w"] == U.DEFAULT_ATTR_WEIGHTS)
+def current_ranking():
+    """Ranking settings as last chosen by the user (without drawing widgets)."""
+    st_ = _store()
+    return {
+        "feas_pct": st_.get("r_feas_pct", 60),
+        "top_n": st_.get("r_top_n", 30),
+        "feas_w": {k: st_.get(f"r_f_{k}", U.DEFAULT_FEAS_WEIGHTS[k]) for k in FEAS_LABELS},
+        "attr_w": {k: st_.get(f"r_a_{k}", U.DEFAULT_ATTR_WEIGHTS[k]) for k in ATTR_LABELS},
+    }
+
+
+def settings_summary(ranking=None):
+    """One-line description of the current simulation settings."""
+    s = stage1_settings()
+    r = ranking or current_ranking()
+    logic = "and" if "AND" in s["s1_logic"] else "or"
+    extra = []
+    if s["s1_legacy"]:
+        extra.append("legacy exclusions")
+    if s["s1_cbam"]:
+        extra.append("CBAM only")
+    if s["s1_green"]:
+        extra.append("green supply chains only")
+    if s["s1_rca"]:
+        extra.append(f"Morocco RCA ≥ {s['s1_rca']}")
+    pool = (f"energy ≥ {s['s1_energy']}th pct {logic} electricity ≥ {s['s1_elec']}th pct, "
+            f"trade ≥ {s['s1_trade']}th pct" + (f" ({', '.join(extra)})" if extra else ""))
+    return (f"<b>Your settings.</b> Candidate pool: {pool}. Ranking: {r['feas_pct']}% feasibility / "
+            f"{100 - r['feas_pct']}% attractiveness, Top {r['top_n']}. Change them in step 1 and in the sidebar.")
 
 
 # ============================================================

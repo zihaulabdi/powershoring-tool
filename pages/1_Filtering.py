@@ -34,7 +34,7 @@ trade_pct = ui.persist(sb.slider, "World trade: minimum percentile", "s1_trade",
 
 with sb.expander("More filters"):
     legacy = ui.persist(st.checkbox, "Legacy exclusions (HS 01–27 only)", "s1_legacy", False,
-                        help="Default also excludes stone articles (HS 68), precious metals (HS 71) and raw "
+                        help="Unticked, the tool also excludes stone articles (HS 68), precious metals (HS 71) and raw "
                              "fibres (HS 5001, 5101, 5201, 5301). Tick to reproduce pre-April 2026 results.")
     cbam_only = ui.persist(st.checkbox, "CBAM-covered products only", "s1_cbam", False)
     green_only = ui.persist(st.checkbox, "Green supply chain products only", "s1_green", False)
@@ -46,7 +46,7 @@ with sb.expander("More filters"):
                          min_value=0.0, max_value=5.0, step=0.1,
                          help="Above 0 keeps only products Morocco already exports.")
 
-if sb.button("Reset step 1 to defaults"):
+if sb.button("Reset step 1 controls"):
     ui.reset_settings("s1_")
     st.rerun()
 
@@ -61,18 +61,15 @@ n_cbam = int((pool["cbam_flag"] == 1).sum())
 # HEADER
 # ============================================================
 ui.page_header(
-    "Step 1 of 3 · Candidate pool",
-    "Which products are energy-intensive enough to matter?",
+    "Step 1 of 3",
+    "Candidate pool",
     lede=(
-        "Powershoring only matters for products where energy is a large share of costs. This step keeps "
-        "manufactured products that use a lot of energy or electricity per dollar of output, and that are "
-        f"traded in meaningful volumes. Of {len(df):,} products, <b>{len(pool):,}</b> pass the current thresholds."
+        "Keep the manufactured products that use a lot of energy or electricity per dollar of output and "
+        "are traded in large enough volumes. Set the thresholds in the sidebar. "
+        f"<b>{len(pool):,}</b> of {len(df):,} products pass the current thresholds."
     ),
 )
 
-if not ui.stage1_is_default():
-    ui.note("You have changed the defaults. Steps 2 and 3 use these settings. "
-            "The Shortlist page always uses the defaults.", accent=True)
 
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Candidate products", f"{len(pool):,}")
