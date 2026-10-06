@@ -1,133 +1,132 @@
-"""Summary -- Top candidate industries at a glance."""
+"""Shortlist: robust candidate industries under the default assumptions."""
 
-import streamlit as st
+import os
+import sys
+
 import pandas as pd
-import numpy as np
-import plotly.express as px
-import sys, os
+import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import (
-    load_data, GL_PALETTE_EXT, GL_TEMPLATE, MOROCCO_RED, GREY,
-    format_dollars, download_csv,
-    SCENARIO_DEFS, run_scenario_scoring, DEFAULT_FEAS_WEIGHTS, DEFAULT_ATTR_WEIGHTS,
-    aggregate_to_hs4, _default_stage1_filter,
-    inject_custom_css,
+import ui  # noqa: E402
+import utils as U  # noqa: E402
+
+TOP_N = 30
+SCEN = list(U.SCENARIO_DEFS.keys())
+
+# ------------------------------------------------------------
+# Compute: four scenarios on the default pool and default weights.
+# The shortlist deliberately ignores the user's own settings so that
+# everyone who opens this page sees the same answer.
+# ------------------------------------------------------------
+with st.spinner("Running the four scenarios..."):
+    default_s1 = dict(ui.STAGE1_DEFAULTS)
+    pool, _ = ui.candidate_pool(default_s1)
+    results = ui.scenario_results(stage1=default_s1)
+    table = U.robustness_table(results, top_n=TOP_N, level="HS4")
+
+robust = table[table["n_scenarios"] >= U.ROBUST_MIN_SCENARIOS].copy().reset_index(drop=True)
+single = table[table["n_scenarios"] == 1].copy()
+robust["label"] = robust["description"].map(ui.short_label)
+n_all = int((robust["n_scenarios"] == len(SCEN)).sum())
+n_three = int((robust["n_scenarios"] == 3).sum())
+
+# ------------------------------------------------------------
+# Header
+# ------------------------------------------------------------
+ui.page_header(
+    "Result · default assumptions",
+    "Robust candidate industries",
+    lede=(
+        f"<b>{len(robust)} industries</b> make the Top {TOP_N} under at least "
+        f"{U.ROBUST_MIN_SCENARIOS} of the four relocation scenarios. "
+        f"{n_all} appears under all four and {n_three} under three. "
+        "Because they do not depend on a single theory of why industries relocate, "
+        "these are the strongest starting points for deeper sector work."
+    ),
 )
 
-st.set_page_config(page_title="Summary", layout="wide")
-inject_custom_css()
-st.title("Summary")
-st.caption(
-    "Top candidate industries based on the No Prior scenario. "
-    "Standard thresholds: energy >= 75th pct OR electricity >= 50th pct, trade >= 15th pct."
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Robust industries", f"{len(robust)}")
+k2.metric("In 3 or 4 scenarios", f"{n_all + n_three}")
+k3.metric("Sectors (HS2)", f"{robust['hs2_name'].nunique()}")
+k4.metric("World exports", ui.fmt_usd(robust["global_export_value"].sum()))
+
+# ------------------------------------------------------------
+# Chart: which scenarios each industry appears in
+# ------------------------------------------------------------
+ui.chart_header(
+    "Where each robust industry makes the shortlist",
+    f"Each row is an HS4 industry. A filled dot means the industry is in that scenario's Top {TOP_N}. "
+    "Rows are ordered by number of scenarios, then by average composite score (shown on the right).",
 )
 
-df_all = load_data()
+ui.plot(ui.scenario_dots(robust, SCEN))
 
-# ============================================================
-# RUN NO PRIOR SCENARIO WITH DEFAULT THRESHOLDS
-# ============================================================
-with st.spinner("Calculating..."):
-    filtered = _default_stage1_filter(df_all)
-
-    no_prior_weights = SCENARIO_DEFS["No Prior"]["weights"]
-    scored = run_scenario_scoring(
-        filtered,
-        no_prior_weights,
-        DEFAULT_FEAS_WEIGHTS,
-        DEFAULT_ATTR_WEIGHTS,
-        fa_reference_df=filtered,
+# ------------------------------------------------------------
+# Sector view
+# ------------------------------------------------------------
+left, right = st.columns([1, 1])
+with left:
+    ui.chart_header("Robust industries by sector", "Number of robust HS4 industries in each HS2 chapter.")
+    by_sector = robust.groupby("hs2_name").size().sort_values(ascending=False)
+    ui.plot(ui.hbar(by_sector.index, by_sector.values, value_fmt=",.0f"))
+with right:
+    ui.chart_header("How to read the scores", None)
+    st.markdown(
+        "- **Composite** = 60% feasibility + 40% attractiveness, averaged over the scenarios "
+        "where the industry appears.\n"
+        "- **Feasibility** measures Morocco's readiness: capability proximity, existing export "
+        "strength, market openness and trade distance.\n"
+        "- **Attractiveness** measures the prize: product complexity, diversification value, "
+        "market size, growth and spillovers.\n"
+        "- All scores are **percentile ranks** within the candidate pool (0 to 100), so 80 means "
+        "better than 80% of candidates."
     )
-    scored["composite_score"] = 0.60 * scored["feasibility_score"] + 0.40 * scored["attractiveness_score"]
-    hs4 = aggregate_to_hs4(scored)
-    top30_hs4 = hs4.nlargest(30, "composite_score").reset_index(drop=True)
 
-# ============================================================
-# TREEMAP
-# ============================================================
-treemap_choice = st.radio(
-    "Size by:", ["By number of products", "By trade volume"],
-    horizontal=True,
-)
-
-agg_tm = top30_hs4.groupby("hs2_name").agg(
-    n_products=("n_products", "sum"),
-    trade=("global_export_value", "sum"),
-).reset_index()
-
-if treemap_choice == "By number of products":
-    agg_tm["value"] = agg_tm["n_products"]
-else:
-    agg_tm["value"] = agg_tm["trade"]
-
-fig_tm = px.treemap(
-    agg_tm, path=["hs2_name"], values="value",
-    color="hs2_name",
-    color_discrete_sequence=GL_PALETTE_EXT,
-    title="HS2 Chapter Composition - Top 30 Products (No Prior Scenario)",
-)
-fig_tm.update_traces(textinfo="label+percent root")
-fig_tm.update_layout(template=GL_TEMPLATE, height=450, margin=dict(t=50, l=10, r=10, b=10))
-st.plotly_chart(fig_tm, use_container_width=True)
-
-# ============================================================
-# TABLE: TOP 5 HS2 CHAPTERS AND THEIR HS4 PRODUCTS
-# ============================================================
-st.markdown("### Top 5 HS2 Chapters and Their Candidate Industries")
-
-# Rank HS2 chapters by avg composite of their HS4s in the top 30
-hs2_avg = (
-    top30_hs4.groupby("hs2_name")["composite_score"]
-    .mean()
-    .sort_values(ascending=False)
-)
-top5_hs2 = list(hs2_avg.index[:5])
-
-# Filter top30 to those chapters
-table_df = top30_hs4[top30_hs4["hs2_name"].isin(top5_hs2)].copy()
-table_df["_hs2_rank"] = table_df["hs2_name"].map({h: i for i, h in enumerate(top5_hs2)})
-table_df = (
-    table_df
-    .sort_values(["_hs2_rank", "composite_score"], ascending=[True, False])
-    .drop(columns=["_hs2_rank"])
-    .reset_index(drop=True)
-)
-
-# Pre-format trade as string (avoids NumberColumn formatting issues)
-table_df["trade_fmt"] = table_df["global_export_value"].apply(format_dollars)
-
-col_config = {
-    "hs2_name": st.column_config.TextColumn("HS2 Chapter", width="medium"),
-    "hs4_code": st.column_config.TextColumn("HS4 Code", width="small"),
-    "name_short": st.column_config.TextColumn("Industry", width="large"),
-    "composite_score": st.column_config.ProgressColumn(
-        "Composite", min_value=0, max_value=100, format="%.0f"
-    ),
-    "feasibility_score": st.column_config.ProgressColumn(
-        "Feasibility", min_value=0, max_value=100, format="%.0f"
-    ),
-    "attractiveness_score": st.column_config.ProgressColumn(
-        "Attractiveness", min_value=0, max_value=100, format="%.0f"
-    ),
-    "trade_fmt": st.column_config.TextColumn("Global Trade"),
+# ------------------------------------------------------------
+# Table
+# ------------------------------------------------------------
+ui.chart_header("Robust industries: full table", "Sort any column by clicking its header.")
+tbl = robust.rename(columns={"code": "HS4", "label": "Industry", "hs2_name": "Sector",
+                             "n_scenarios": "Scenarios"})
+tbl.index = tbl.index + 1
+tbl.index.name = "Rank"
+show = ["HS4", "Industry", "Sector", "Scenarios"] + SCEN + [
+    "composite_score", "feasibility_score", "attractiveness_score", "global_export_value"]
+colcfg = {
+    "HS4": st.column_config.TextColumn(width="small"),
+    "Industry": st.column_config.TextColumn(width="medium"),
+    "Sector": st.column_config.TextColumn(width="small"),
+    "Scenarios": st.column_config.NumberColumn(format="%d of 4", width="small"),
+    "composite_score": st.column_config.ProgressColumn("Composite", min_value=0, max_value=100, format="%.0f"),
+    "feasibility_score": st.column_config.NumberColumn("Feasibility", format="%.0f", width="small"),
+    "attractiveness_score": st.column_config.NumberColumn("Attractiveness", format="%.0f", width="small"),
+    "global_export_value": st.column_config.NumberColumn("World exports ($)", format="compact"),
 }
+for s in SCEN:
+    colcfg[s] = st.column_config.CheckboxColumn(ui.SCENARIO_SHORT[s], width="small")
+st.dataframe(tbl[show], column_config=colcfg, width="stretch", height=min(38 * len(tbl) + 40, 720))
 
-show_cols = [c for c in [
-    "hs2_name", "hs4_code", "name_short",
-    "composite_score", "feasibility_score", "attractiveness_score",
-    "trade_fmt",
-] if c in table_df.columns]
+export = robust.drop(columns=["label"]).rename(columns={"code": "hs4_code"})
+U.download_csv(export, "powershoring_robust_shortlist.csv",
+               f"Robust = Top {TOP_N} in {U.ROBUST_MIN_SCENARIOS}+ scenarios | default assumptions | "
+               f"{U.METHODOLOGY_VERSION}")
 
-st.dataframe(
-    table_df[show_cols],
-    column_config=col_config,
-    use_container_width=True,
-    height=550,
-)
+# ------------------------------------------------------------
+# Scenario-specific candidates
+# ------------------------------------------------------------
+with st.expander(f"Industries that make only one scenario's shortlist ({len(single)})"):
+    st.markdown("These depend on one theory of relocation. They are worth a look if you believe that theory "
+                "is the right one, but they are less safe bets.")
+    for s in SCEN:
+        only = single[single[s]]
+        if len(only):
+            st.markdown(f"**{s}** ({len(only)}): " + "; ".join(
+                f"{ui.short_label(d, 45)} ({c})" for c, d in zip(only["code"], only["description"])))
 
-download_csv(
-    table_df[show_cols],
-    "powershoring_summary_top30.csv",
-    "No Prior scenario, standard thresholds, 60F/40A",
+ui.note(
+    f"<b>Assumptions.</b> Candidate pool: {len(pool):,} manufactured products with energy intensity at or above "
+    "the 75th percentile or electricity intensity at or above the 50th, and world trade at or above the 15th "
+    "percentile. Ranking: default feasibility and attractiveness weights, 60/40. To test other assumptions, "
+    "work through steps 1 to 3; this page does not change when you do.",
 )

@@ -1,6 +1,9 @@
-streamlit>=1.30.0
-plotly>=5.18.0
-pandas>=1.5.0
-pyarrow>=14.0.0
-openpyxl>=3.1.0
-numpy>=1.24.0
+# Streamlit is pinned exactly: it removes deprecated options between releases,
+# so an unpinned install on Streamlit Cloud can break the live app.
+# Other packages use bounded ranges so they still install on newer Python versions.
+streamlit==1.50.0
+plotly>=6.0,<7
+pandas>=2.0,<3
+numpy>=1.24,<3
+pyarrow>=14.0
+openpyxl>=3.1

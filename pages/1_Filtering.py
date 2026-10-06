@@ -1,240 +1,172 @@
-"""Stage 1: Filtering -- Define the candidate product universe."""
+"""Step 1: define the candidate pool by energy and trade thresholds."""
 
-import streamlit as st
-import pandas as pd
-import plotly.express as px
+import os
+import sys
+
+import numpy as np
 import plotly.graph_objects as go
-import math
-import sys, os
+import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import (
-    load_data, GL_PALETTE_EXT, GL_TEMPLATE, MOROCCO_RED, GREY,
-    VARIABLE_LABELS, make_treemap, make_bar_chart,
-    download_csv, format_dollars,
-    inject_custom_css, _HS4_DESC_LOOKUP,
-    apply_stage1_filter,
-)
+import ui  # noqa: E402
+import utils as U  # noqa: E402
 
-st.set_page_config(page_title="1. Filtering", layout="wide")
-inject_custom_css()
-st.title("Filtering")
-st.markdown("Define the candidate product universe by setting energy intensity and trade volume thresholds.")
-
-df = load_data()
+df = U.load_data()
 
 # ============================================================
-# SIDEBAR
+# SIDEBAR: thresholds (persist across pages)
 # ============================================================
-with st.sidebar:
-    st.divider()
-    st.header("Filter Controls")
+sb = st.sidebar
+sb.header("Energy thresholds")
+energy_pct = ui.persist(sb.slider, "Total energy intensity: minimum percentile", "s1_energy", 75,
+                        min_value=0, max_value=100, step=5, format="%dth",
+                        help="Percentile of fuel + electricity use per $ of output, across all products.")
+elec_pct = ui.persist(sb.slider, "Electricity intensity: minimum percentile", "s1_elec", 50,
+                      min_value=0, max_value=100, step=5, format="%dth",
+                      help="Percentile of electricity use per $ of output, across all products.")
+logic = ui.persist(sb.radio, "A product passes if it clears", "s1_logic", "Either threshold (OR)",
+                   options=["Either threshold (OR)", "Both thresholds (AND)"])
 
-    st.subheader("Exclusions")
-    use_legacy_exclusion = st.checkbox(
-        "Use legacy exclusion (HS 01-27 only)",
-        value=False,
-        help=(
-            "Default (off): excludes HS 01-27 plus HS 68 (stone articles), "
-            "HS 71 (precious metals), and raw agricultural fibers (HS4 headings "
-            "5001 silk, 5101 wool, 5201 cotton, 5301 flax). "
-            "Legacy (on): only excludes HS 01-27 -- reproduces pre-2026-04 results."
-        ),
-    )
+sb.header("Trade threshold")
+trade_pct = ui.persist(sb.slider, "World trade: minimum percentile", "s1_trade", 15,
+                       min_value=0, max_value=50, step=5, format="%dth",
+                       help="Removes thinly traded products, which are hard to build an export industry on.")
 
-    st.subheader("Energy Thresholds")
-    energy_pct   = st.slider("Energy intensity (carriers) percentile", 0, 100, 75,
-                              help="amount_carriers >= this percentile")
-    elec_pct     = st.slider("Electricity intensity percentile", 0, 100, 50,
-                              help="amount_electric_energy >= this percentile")
-    filter_logic = st.radio("Energy filter logic", ["OR", "AND"], index=0,
-                            help="OR: either criterion suffices. AND: both required.")
-
-    st.subheader("Trade Volume")
-    trade_pct = st.slider("Trade volume percentile", 0, 100, 15,
-                           help="global_export_value >= this percentile")
-
-    st.subheader("Additional Filters")
-    cbam_only  = st.checkbox("CBAM-covered products only", value=False)
-    green_only = st.checkbox("Green supply chain only", value=False)
-    green_topics = []
+with sb.expander("More filters"):
+    legacy = ui.persist(st.checkbox, "Legacy exclusions (HS 01–27 only)", "s1_legacy", False,
+                        help="Default also excludes stone articles (HS 68), precious metals (HS 71) and raw "
+                             "fibres (HS 5001, 5101, 5201, 5301). Tick to reproduce pre-April 2026 results.")
+    cbam_only = ui.persist(st.checkbox, "CBAM-covered products only", "s1_cbam", False)
+    green_only = ui.persist(st.checkbox, "Green supply chain products only", "s1_green", False)
+    topics = []
     if green_only:
-        all_topics = sorted([t for t in df["green_topic"].unique() if t])
-        green_topics = st.multiselect("Select supply chains", all_topics, default=all_topics)
+        all_topics = sorted([t for t in df["green_topic"].dropna().unique() if t])
+        topics = ui.persist(st.multiselect, "Supply chains", "s1_topics", all_topics, options=all_topics)
+    rca_min = ui.persist(st.slider, "Minimum Morocco RCA", "s1_rca", 0.0,
+                         min_value=0.0, max_value=5.0, step=0.1,
+                         help="Above 0 keeps only products Morocco already exports.")
 
-    rca_threshold = st.slider("Morocco RCA minimum", 0.0, 5.0, 0.0, 0.1,
-                               help="Set > 0 to require Morocco has existing exports")
+if sb.button("Reset step 1 to defaults"):
+    ui.reset_settings("s1_")
+    st.rerun()
 
 # ============================================================
-# APPLY FILTERS
+# COMPUTE
 # ============================================================
-filtered, stage1_meta = apply_stage1_filter(
-    df,
-    energy_percentile=energy_pct,
-    elec_percentile=elec_pct,
-    trade_percentile=trade_pct,
-    filter_logic=filter_logic,
-    use_legacy=use_legacy_exclusion,
-    cbam_only=cbam_only,
-    green_only=green_only,
-    green_topics=green_topics,
-    rca_threshold=rca_threshold,
-    return_metadata=True,
+pool, meta = ui.candidate_pool()
+th = meta["thresholds"]
+n_cbam = int((pool["cbam_flag"] == 1).sum())
+
+# ============================================================
+# HEADER
+# ============================================================
+ui.page_header(
+    "Step 1 of 3 · Candidate pool",
+    "Which products are energy-intensive enough to matter?",
+    lede=(
+        "Powershoring only matters for products where energy is a large share of costs. This step keeps "
+        "manufactured products that use a lot of energy or electricity per dollar of output, and that are "
+        f"traded in meaningful volumes. Of {len(df):,} products, <b>{len(pool):,}</b> pass the current thresholds."
+    ),
 )
-filter_description = stage1_meta["description"]
-thresholds = stage1_meta["thresholds"]
-energy_thresh = thresholds["energy_threshold"]
-elec_thresh = thresholds["elec_threshold"]
-trade_thresh = thresholds["trade_threshold"]
 
-# Save to session state
-st.session_state.filtered_products = filtered
-st.session_state.stage_1_complete  = True
+if not ui.stage1_is_default():
+    ui.note("You have changed the defaults. Steps 2 and 3 use these settings. "
+            "The Shortlist page always uses the defaults.", accent=True)
+
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Candidate products", f"{len(pool):,}")
+k2.metric("Share of all products", f"{100 * len(pool) / len(df):.0f}%")
+k3.metric("World exports", ui.fmt_usd(pool["global_export_value"].sum()))
+k4.metric("CBAM-covered", f"{n_cbam:,}")
+
+logic_word = "and" if "AND" in logic else "or"
+ui.small(
+    f"Rule: energy ≥ {th['energy_threshold']:.1f} MJ/$ (top {100 - energy_pct}%) {logic_word} "
+    f"electricity ≥ {th['elec_threshold']:.2f} MJ/$ (top {100 - elec_pct}%), and world trade ≥ "
+    f"{ui.fmt_usd(th['trade_threshold'])}. Agriculture, food and extractive chapters (HS 01–27) are excluded"
+    + ("." if legacy else ", along with HS 68, HS 71 and raw fibres.")
+    + " Percentiles are computed across all products."
+)
+
+if len(pool) == 0:
+    st.warning("No products pass these thresholds. Loosen them in the sidebar.")
+    st.stop()
 
 # ============================================================
-# KPI ROW
+# SECTOR COMPOSITION
 # ============================================================
-col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Products", f"{len(filtered):,}")
-col2.metric("% of Universe", f"{100 * len(filtered) / len(df):.1f}%")
-col3.metric("Global Trade", format_dollars(filtered["global_export_value"].sum()))
-col4.metric("HS2 Chapters", filtered["hs2_code"].nunique())
-col5.metric("Avg Elec. Intensity", f"{filtered['amount_electric_energy'].mean():.2f} MJ/$")
-
-st.caption(f"**Active filters:** {filter_description}")
+size_by = st.radio("Measure sectors by", ["Number of products", "World exports"], horizontal=True,
+                   key="f_size_by")
+if size_by == "Number of products":
+    s = pool.groupby("hs2_name").size().sort_values(ascending=False)
+    fmt, sub = ",.0f", "Number of HS6 products in the pool, top 15 HS2 chapters."
+else:
+    s = pool.groupby("hs2_name")["global_export_value"].sum().sort_values(ascending=False) / 1e9
+    fmt, sub = ",.0f", "World exports of products in the pool, $ billion, top 15 HS2 chapters."
+ui.chart_header("Which sectors make up the pool", sub)
+top = s.head(15)
+ui.plot(ui.hbar(top.index, top.values, value_fmt=fmt))
+if len(s) > 15:
+    ui.small(f"{len(s) - 15} smaller chapters not shown. The full list is in the table below.")
 
 # ============================================================
-# MAIN AREA
+# DISTRIBUTIONS
 # ============================================================
-tab_treemap, tab_bar, tab_table = st.tabs(["Treemap", "Industry List", "Data Table"])
+with st.expander("Where the thresholds fall in the distribution"):
+    d1, d2, d3 = st.columns(3)
 
-with tab_treemap:
-    treemap_metric = st.radio(
-        "Size by:", ["global_export_value", "amount_carriers", "amount_electric_energy"],
-        format_func=lambda x: VARIABLE_LABELS.get(x, x),
-        horizontal=True,
-    )
-    fig = make_treemap(filtered, treemap_metric,
-                       title=f"Filtered Products by HS2 -- {VARIABLE_LABELS.get(treemap_metric, treemap_metric)}")
-    st.plotly_chart(fig, use_container_width=True)
+    def _hist(all_vals, kept_vals, cut, title, xlab):
+        fig = go.Figure()
+        fig.add_trace(go.Histogram(x=all_vals, name="All products", marker_color=ui.WASH, nbinsx=50))
+        fig.add_trace(go.Histogram(x=kept_vals, name="In pool", marker_color=ui.INK, nbinsx=50))
+        if cut is not None:
+            fig.add_vline(x=cut, line_dash="dot", line_color=ui.ACCENT)
+        fig.update_layout(barmode="overlay", height=260, xaxis_title=xlab, yaxis_title="Products",
+                          margin=dict(l=10, r=10, t=30, b=40))
+        ui.chart_header(title)
+        ui.plot(fig)
 
-with tab_bar:
-    bar_metric = st.radio(
-        "Sort by:", ["global_export_value", "amount_carriers", "amount_electric_energy", "pci"],
-        format_func=lambda x: VARIABLE_LABELS.get(x, x),
-        horizontal=True,
-        key="bar_sort",
-    )
-    agg_func = "sum" if bar_metric in ("global_export_value",) else "mean"
-    hs2_bar = filtered.groupby(["hs2_code", "hs2_name"]).agg(
-        value=(bar_metric, agg_func),
-        n_products=("hs_product_code", "count"),
-    ).reset_index().sort_values("value", ascending=True)
+    # Log scale keeps the long right tail readable
+    with d1:
+        _hist(np.log10(df["amount_carriers"].dropna().clip(lower=1e-3)),
+              np.log10(pool["amount_carriers"].dropna().clip(lower=1e-3)),
+              np.log10(max(th["energy_threshold"], 1e-3)), "Total energy intensity", "log10 MJ per $")
+    with d2:
+        _hist(np.log10(df["amount_electric_energy"].dropna().clip(lower=1e-3)),
+              np.log10(pool["amount_electric_energy"].dropna().clip(lower=1e-3)),
+              np.log10(max(th["elec_threshold"], 1e-3)), "Electricity intensity", "log10 MJ per $")
+    with d3:
+        _hist(np.log10(df["global_export_value"].clip(lower=1)),
+              np.log10(pool["global_export_value"].clip(lower=1)),
+              np.log10(max(th["trade_threshold"], 1)), "World trade", "log10 $")
+    ui.small("Grey: all products. Black: products in the pool. Dotted line: threshold. "
+             "With OR logic, products below one energy line can still pass on the other.")
 
-    bar_n = st.slider("Top N industries", 5, min(40, len(hs2_bar)), min(20, len(hs2_bar)), key="bar_n")
-    top_hs2 = hs2_bar.nlargest(bar_n, "value").sort_values("value", ascending=True)
-
-    fig = px.bar(
-        top_hs2, x="value", y="hs2_name", orientation="h",
-        color_discrete_sequence=[MOROCCO_RED],
-        title=f"Top {bar_n} HS2 Industries by {VARIABLE_LABELS.get(bar_metric, bar_metric)}",
-        custom_data=["hs2_code", "n_products"],
-    )
-    fig.update_traces(
-        hovertemplate="<b>%{y}</b><br>Value: %{x:,.2f}<br>HS2: %{customdata[0]}<br>Products: %{customdata[1]}<extra></extra>"
-    )
-    agg_label = "Total" if agg_func == "sum" else "Avg"
-    fig.update_layout(
-        template=GL_TEMPLATE,
-        height=max(400, bar_n * 25),
-        yaxis_title="",
-        xaxis_title=f"{agg_label} {VARIABLE_LABELS.get(bar_metric, bar_metric)}",
-        margin=dict(l=300),
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-with tab_table:
-    tbl = filtered.copy()
-    tbl["hs4_code"] = tbl["hs_product_code"].astype(str).str.zfill(6).str[:4]
-    tbl["hs4_description"] = tbl["hs4_code"].map(_HS4_DESC_LOOKUP).fillna("")
-    if "description" in tbl.columns:
-        tbl["description"] = tbl["description"].where(
-            tbl["description"].notna() & (tbl["description"] != ""),
-            tbl["hs4_description"],
-        )
-
-    display_cols = [
-        "hs_product_code", "hs4_code", "hs4_description", "hs2_name",
-        "description", "amount_carriers", "amount_electric_energy",
-        "global_export_value", "cbam_flag",
-    ]
-    display_cols = [c for c in display_cols if c in tbl.columns]
-
-    col_config_tbl = {
-        "hs_product_code": st.column_config.TextColumn("HS6 Code", width="small"),
-        "hs4_code": st.column_config.TextColumn("HS4 Parent", width="small"),
-        "hs4_description": st.column_config.TextColumn("HS4 Description", width="large"),
-        "hs2_name": st.column_config.TextColumn("HS2 Chapter", width="medium"),
-        "description": st.column_config.TextColumn("Product Description", width="large"),
-        "amount_carriers": st.column_config.NumberColumn("Energy Intensity (MJ/$)", format="%.2f"),
-        "amount_electric_energy": st.column_config.NumberColumn("Elec. Intensity (MJ/$)", format="%.2f"),
-        "global_export_value": st.column_config.NumberColumn("Global Trade ($)", format="$%.0f"),
+# ============================================================
+# TABLE
+# ============================================================
+ui.chart_header("Products in the pool", "Sorted by world exports. Search with the magnifier icon above the table.")
+tbl = pool.copy()
+tbl["HS6"] = tbl["hs_product_code"].astype(str).str.zfill(6)
+tbl["Product"] = ui.product_names(tbl, 90)
+cols = ["HS6", "Product", "hs2_name", "amount_carriers", "amount_electric_energy",
+        "global_export_value", "rca_mar", "cbam_flag"]
+st.dataframe(
+    tbl.sort_values("global_export_value", ascending=False)[cols],
+    column_config={
+        "HS6": st.column_config.TextColumn(width="small"),
+        "Product": st.column_config.TextColumn(width="large"),
+        "hs2_name": st.column_config.TextColumn("Sector", width="medium"),
+        "amount_carriers": st.column_config.NumberColumn("Energy (MJ/$)", format="%.1f"),
+        "amount_electric_energy": st.column_config.NumberColumn("Electricity (MJ/$)", format="%.2f"),
+        "global_export_value": st.column_config.NumberColumn("World exports ($)", format="compact"),
+        "rca_mar": st.column_config.NumberColumn("Morocco RCA", format="%.2f"),
         "cbam_flag": st.column_config.CheckboxColumn("CBAM"),
-    }
+    },
+    hide_index=True, width="stretch", height=460,
+)
+U.download_csv(pool, "powershoring_candidate_pool.csv", meta["description"])
 
-    st.dataframe(
-        tbl[display_cols].sort_values("global_export_value", ascending=False),
-        column_config=col_config_tbl,
-        use_container_width=True,
-        height=500,
-    )
-    st.markdown(f"**{len(filtered)} products** passing filters")
-    download_csv(filtered, "powershoring_filtered_products.csv", filter_description)
-
-# Threshold distributions in expander
-with st.expander("View threshold distributions", expanded=False):
-    dist_c1, dist_c2, dist_c3 = st.columns(3)
-    with dist_c1:
-        st.markdown("**Energy Intensity (Carriers)**")
-        fig_e = go.Figure()
-        fig_e.add_trace(go.Histogram(x=df["amount_carriers"].dropna(), name="All products",
-                                     marker_color=GREY, opacity=0.6, nbinsx=50))
-        fig_e.add_trace(go.Histogram(x=filtered["amount_carriers"].dropna(), name="Filtered",
-                                     marker_color=MOROCCO_RED, opacity=0.7, nbinsx=50))
-        fig_e.add_vline(x=energy_thresh, line_dash="dash", line_color="black",
-                        annotation_text=f"{energy_pct}th pct: {energy_thresh:.1f}")
-        fig_e.update_layout(template=GL_TEMPLATE, barmode="overlay", height=300,
-                            xaxis_title="Energy Intensity (MJ/$)", yaxis_title="Count")
-        st.plotly_chart(fig_e, use_container_width=True)
-
-    with dist_c2:
-        st.markdown("**Electricity Intensity**")
-        fig_elec = go.Figure()
-        fig_elec.add_trace(go.Histogram(x=df["amount_electric_energy"].dropna(), name="All products",
-                                        marker_color=GREY, opacity=0.6, nbinsx=50))
-        fig_elec.add_trace(go.Histogram(x=filtered["amount_electric_energy"].dropna(), name="Filtered",
-                                        marker_color=MOROCCO_RED, opacity=0.7, nbinsx=50))
-        fig_elec.add_vline(x=elec_thresh, line_dash="dash", line_color="black",
-                           annotation_text=f"{elec_pct}th pct: {elec_thresh:.1f}")
-        fig_elec.update_layout(template=GL_TEMPLATE, barmode="overlay", height=300,
-                               xaxis_title="Electricity Intensity (MJ/$)", yaxis_title="Count")
-        st.plotly_chart(fig_elec, use_container_width=True)
-
-    with dist_c3:
-        st.markdown("**Trade Volume**")
-        fig_t = go.Figure()
-        fig_t.add_trace(go.Histogram(
-            x=df["global_export_value"].dropna().apply(lambda x: max(x, 1)).apply(math.log10),
-            name="All products", marker_color=GREY, opacity=0.6, nbinsx=50))
-        fig_t.add_trace(go.Histogram(
-            x=filtered["global_export_value"].dropna().apply(lambda x: max(x, 1)).apply(math.log10),
-            name="Filtered", marker_color=MOROCCO_RED, opacity=0.7, nbinsx=50))
-        fig_t.update_layout(template=GL_TEMPLATE, barmode="overlay", height=300,
-                            xaxis_title="Log10(Global Export Value $)", yaxis_title="Count")
-        st.plotly_chart(fig_t, use_container_width=True)
-
-# Stage gate
 st.divider()
-st.success(f"{len(filtered):,} products selected. Proceed to Likelihood and Prioritization to score and rank.")
-if st.button("Proceed to Likelihood and Prioritization", type="primary"):
-    st.switch_page("pages/2_Likelihood_Prioritization.py")
+st.page_link("pages/2_Likelihood_Prioritization.py", label="Next: score and rank these products  →")

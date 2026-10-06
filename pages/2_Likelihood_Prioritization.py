@@ -1,395 +1,241 @@
-"""Stage 2: Likelihood Scenario and Prioritization -- Score and rank products."""
+"""Step 2: score relocation likelihood, then rank on feasibility and attractiveness."""
 
-import streamlit as st
-import pandas as pd
+import os
+import sys
+
 import numpy as np
-import plotly.express as px
+import pandas as pd
 import plotly.graph_objects as go
-import sys, os
+import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import (
-    load_data, GL_PALETTE_EXT, GL_TEMPLATE, MOROCCO_RED, GREY,
-    VARIABLE_LABELS, make_treemap, download_csv, format_dollars,
-    percentile_rank, weighted_score,
-    SCENARIO_DEFS, DEFAULT_FEAS_WEIGHTS, DEFAULT_ATTR_WEIGHTS,
-    inject_custom_css, _HS4_DESC_LOOKUP,
-    add_feasibility_attractiveness_scores,
-)
+import ui  # noqa: E402
+import utils as U  # noqa: E402
 
-st.set_page_config(page_title="2. Likelihood and Prioritization", layout="wide")
-inject_custom_css()
-st.title("Likelihood Scenario and Prioritization")
+LIKE_LABELS = {
+    "fuel": "Fuel intensity",
+    "elec": "Electricity intensity",
+    "vuln": "Incumbent vulnerability",
+    "cbam": "CBAM exposure",
+    "growth": "Market growth",
+}
+CUSTOM = "Custom weights"
 
-# ============================================================
-# STAGE GATE
-# ============================================================
-if not st.session_state.get("stage_1_complete"):
-    st.error("Complete **Filtering** first to define the candidate universe.")
-    if st.button("Go to Filtering"):
-        st.switch_page("pages/1_Filtering.py")
-    st.stop()
-
-df_all = load_data()
-pool = st.session_state.filtered_products.copy()
+pool, meta = ui.candidate_pool()
 
 # ============================================================
 # SIDEBAR
 # ============================================================
-with st.sidebar:
-    st.divider()
+sb = st.sidebar
+sb.header("Relocation theory")
+theory = ui.persist(sb.radio, "Why do industries relocate?", "l_theory", "No Prior",
+                    options=list(U.SCENARIO_DEFS.keys()) + [CUSTOM],
+                    help="Each theory weights the likelihood components differently.")
 
-    # --- Likelihood Scenario ---
-    st.header("Likelihood Scenario")
-    scenario_options = list(SCENARIO_DEFS.keys())
-    chosen_scenario = st.radio("Scenario", scenario_options, index=0,
-                               help="Each scenario represents a different reason why industries relocate.")
-    sdef = SCENARIO_DEFS[chosen_scenario]
-    st.caption(sdef["desc"])
-
-    pre_filter = sdef.get("pre_filter")
-    if pre_filter == "cbam":
-        n_cbam = (pool["cbam_flag"] == 1).sum()
-        st.caption(f"*Pre-filtered to CBAM-covered products ({n_cbam} products).*")
-
-    w_fuel   = sdef["weights"].get("fuel", 0)
-    w_elec   = sdef["weights"].get("elec", 0)
-    w_vuln   = sdef["weights"].get("vuln", 0)
-    w_cbam   = sdef["weights"].get("cbam", 0)
-    w_growth = sdef["weights"].get("growth", 0)
-
-    st.divider()
-
-    # --- Selection Cutoff ---
-    st.header("Selection Cutoff")
-    selection_method = st.radio("Method", ["Top %", "Top N", "Score threshold"])
-    if selection_method == "Top %":
-        top_pct = st.slider("Top %", 10, 100, 50, 5)
-    elif selection_method == "Top N":
-        top_n_val = st.number_input("Top N", 10, len(pool), min(200, len(pool)), 10)
-    else:
-        score_thresh = st.slider("Min score", 0.0, 100.0, 50.0, 1.0)
-
-    st.divider()
-
-    # --- Ranking ---
-    st.header("Ranking")
-    feas_pct = st.slider("Feasibility weight (%)", 0, 100, 60, 5, key="fa_balance")
-    attr_pct = 100 - feas_pct
-    st.caption(f"**{feas_pct}% Feasibility / {attr_pct}% Attractiveness**")
-    top_n_count = st.slider("Top N to highlight", 10, 50, 30, 5, key="topn")
-
-    st.divider()
-
-    with st.expander("Feasibility weights"):
-        f_rca     = st.slider("Morocco RCA", 0, 100, DEFAULT_FEAS_WEIGHTS["rca"], key="f_rca")
-        f_density = st.slider("Capability proximity (Density)", 0, 100, DEFAULT_FEAS_WEIGHTS["density"], key="f_density")
-        f_hhi     = st.slider("Market openness (1/HHI)", 0, 100, DEFAULT_FEAS_WEIGHTS["hhi"], key="f_hhi")
-        f_dist    = st.slider("Trade distance", 0, 100, DEFAULT_FEAS_WEIGHTS["distance"], key="f_dist")
-
-    with st.expander("Attractiveness weights"):
-        a_market    = st.slider("Market size", 0, 100, DEFAULT_ATTR_WEIGHTS["market_size"], key="a_market")
-        a_growth    = st.slider("Market growth", 0, 100, DEFAULT_ATTR_WEIGHTS["growth"], key="a_growth")
-        a_cog       = st.slider("Diversification value (COG)", 0, 100, DEFAULT_ATTR_WEIGHTS["cog"], key="a_cog")
-        a_pci       = st.slider("Product complexity (PCI)", 0, 100, DEFAULT_ATTR_WEIGHTS["pci"], key="a_pci")
-        a_spillover = st.slider("Spillover potential", 0, 100, DEFAULT_ATTR_WEIGHTS["spillover"], key="a_spillover")
-
-    st.divider()
-    st.header("Save Scenario")
-    scenario_name = st.text_input("Scenario name", "", key="scenario_name_input")
-    if st.button("Save current scenario") and scenario_name:
-        st.session_state["_pending_scenario_save"] = scenario_name
-
-# ============================================================
-# COMPUTE LIKELIHOOD SCORES
-# ============================================================
-score_df = pool.copy()
-if pre_filter == "cbam":
-    score_df = score_df[score_df["cbam_flag"] == 1].copy()
-
-total_w = w_fuel + w_elec + w_vuln + w_cbam + w_growth or 1
-
-likelihood_components = {
-    "fuel_pctile": percentile_rank(score_df["amount_fuel_energy"].fillna(0)),
-    "elec_pctile": percentile_rank(score_df["amount_electric_energy"].fillna(0)),
-    "vulnerability_pctile": (
-        percentile_rank(-score_df["vulnerability_score"].fillna(0))
-        if "vulnerability_score" in score_df.columns
-        else pd.Series(50, index=score_df.index)
-    ),
-    "cbam_pctile": (
-        percentile_rank(score_df["cbam_score"].fillna(0))
-        if "cbam_score" in score_df.columns
-        else pd.Series(50, index=score_df.index)
-    ),
-    "growth_pctile": (
-        percentile_rank(score_df["export_cagr_2012_2023"].fillna(0))
-        if "export_cagr_2012_2023" in score_df.columns
-        else pd.Series(50, index=score_df.index)
-    ),
-}
-
-weights_like = {
-    "fuel_pctile": w_fuel, "elec_pctile": w_elec,
-    "vulnerability_pctile": w_vuln, "cbam_pctile": w_cbam, "growth_pctile": w_growth,
-}
-score_df["likelihood_score"] = weighted_score(score_df, likelihood_components, weights_like)
-for k, v in likelihood_components.items():
-    score_df[k] = v
-
-# ============================================================
-# COMPUTE FEASIBILITY + ATTRACTIVENESS
-# ============================================================
-# F/A percentiles are ranked against the full Stage 1 candidate pool, not the
-# scenario-specific post-likelihood subset. This keeps scores comparable across
-# scenarios: likelihood changes the gate, while F/A measures Morocco readiness
-# and market attractiveness against a fixed eligible universe.
-feas_weights = {"rca": f_rca, "density": f_density, "hhi": f_hhi, "distance": f_dist}
-attr_weights = {
-    "market_size": a_market, "growth": a_growth,
-    "cog": a_cog, "pci": a_pci, "spillover": a_spillover,
-}
-score_df = add_feasibility_attractiveness_scores(
-    score_df,
-    feas_weights,
-    attr_weights,
-    reference_df=pool,
-)
-
-# Selection cutoff (F/A already assigned, so selected inherits stable scores)
-if selection_method == "Top %":
-    cutoff = score_df["likelihood_score"].quantile(1 - top_pct / 100)
-    selected = score_df[score_df["likelihood_score"] >= cutoff].copy()
-elif selection_method == "Top N":
-    selected = score_df.nlargest(top_n_val, "likelihood_score").copy()
-    cutoff = selected["likelihood_score"].min() if len(selected) > 0 else 0.0
+if theory == CUSTOM:
+    sb.caption("Set your own weights. They are rescaled to sum to 100%.")
+    weights = {k: ui.persist(sb.slider, lab, f"l_w_{k}", 20 if k != "growth" else 0,
+                             min_value=0, max_value=100, step=5)
+               for k, lab in LIKE_LABELS.items()}
+    pre_filter, default_share = None, 0.5
+    if sum(weights.values()) == 0:
+        sb.error("Give at least one likelihood component a weight above 0.")
+        st.stop()
 else:
-    cutoff = score_thresh
-    selected = score_df[score_df["likelihood_score"] >= cutoff].copy()
+    sdef = U.SCENARIO_DEFS[theory]
+    sb.caption(sdef["desc"])
+    weights = sdef["weights"]
+    pre_filter, default_share = sdef.get("pre_filter"), sdef.get("likelihood_top_share", 0.5)
 
-selected["composite_score"] = (
-    (feas_pct / 100) * selected["feasibility_score"] +
-    (attr_pct / 100) * selected["attractiveness_score"]
-)
+keep_pct = ui.persist(sb.slider, "Keep the most likely…", f"l_keep_{theory}", int(default_share * 100),
+                      min_value=10, max_value=100, step=5, format="%d%%",
+                      help="Share of products kept by likelihood score before ranking. "
+                           "Carbon Regulation keeps 100% because the CBAM filter already narrows the pool.")
 
-# Assign quadrants using fixed threshold of 50 on both axes
-# (fixed thresholds ensure stable quadrant definitions across saved scenarios)
-selected["quadrant"] = selected.apply(
-    lambda r: (
-        "Top Priorities"   if r["feasibility_score"] >= 50 and r["attractiveness_score"] >= 50
-        else "Strategic Bets"    if r["attractiveness_score"] >= 50
-        else "Low-Hanging Fruit" if r["feasibility_score"] >= 50
-        else "Deprioritize"
-    ), axis=1
-)
-
-# Add HS4 label for display
-selected["hs4_code_str"] = selected["hs_product_code"].astype(str).str.zfill(6).str[:4]
-selected["hs4_short"] = selected["hs4_code_str"].map(
-    lambda c: (_HS4_DESC_LOOKUP.get(c, str(c))[:40])
-)
-
-# Save to session state
-st.session_state.likelihood_products  = selected.copy()
-st.session_state.prioritized_products = selected.copy()
-st.session_state.stage_2_complete     = True
-
-# Handle pending scenario save
-if st.session_state.get("_pending_scenario_save"):
-    _sname = st.session_state.pop("_pending_scenario_save")
-    if "saved_scenarios" not in st.session_state:
-        st.session_state.saved_scenarios = {}
-    _weight_desc = (
-        f"Fuel {w_fuel/total_w*100:.0f}%, Elec {w_elec/total_w*100:.0f}%, "
-        f"Vuln {w_vuln/total_w*100:.0f}%, CBAM {w_cbam/total_w*100:.0f}%, "
-        f"Growth {w_growth/total_w*100:.0f}%"
-    )
-    st.session_state.saved_scenarios[_sname] = {
-        "products": selected.copy(),
-        "stage": "likelihood",
-        "desc": f"{chosen_scenario} | Weights: {_weight_desc} | Cutoff: {cutoff:.1f} | {len(selected)} products",
-    }
-    st.success(f"Saved scenario: **{_sname}** ({len(selected)} products)")
+ranking = ui.ranking_controls()
+feas_pct, top_n = ranking["feas_pct"], ranking["top_n"]
 
 # ============================================================
-# KPI ROW
+# COMPUTE
 # ============================================================
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Selected Products", f"{len(selected):,}")
-c2.metric("Avg Feasibility", f"{selected['feasibility_score'].mean():.1f}")
-c3.metric("Avg Attractiveness", f"{selected['attractiveness_score'].mean():.1f}")
-c4.metric("Combined Trade", format_dollars(selected["global_export_value"].sum()))
+scored = pool[pool["cbam_flag"] == 1].copy() if pre_filter == "cbam" else pool.copy()
+if len(scored) == 0:
+    st.warning("No products to score. Loosen the step 1 filters.")
+    st.stop()
 
-# ============================================================
-# TREEMAP
-# ============================================================
-treemap_choice = st.radio(
-    "Size by:", ["Number of products", "Global trade volume"],
-    horizontal=True, key="lp_treemap_metric",
-)
-if treemap_choice == "Number of products":
-    agg_tm = selected.groupby(["hs2_code", "hs2_name"]).agg(
-        value=("hs_product_code", "count"),
-    ).reset_index()
-    tm_title = "HS2 Chapter Composition (by number of products)"
+scored = U.add_likelihood_scores(scored, weights)
+# Feasibility and attractiveness are ranked against the whole candidate pool,
+# so scores are comparable across theories.
+scored = U.add_feasibility_attractiveness_scores(scored, ranking["feas_w"], ranking["attr_w"], reference_df=pool)
+scored["composite_score"] = (feas_pct / 100) * scored["feasibility_score"] + (1 - feas_pct / 100) * scored["attractiveness_score"]
+
+if keep_pct >= 100:
+    kept = scored.copy()
 else:
-    agg_tm = selected.groupby(["hs2_code", "hs2_name"]).agg(
-        value=("global_export_value", "sum"),
-        n_products=("hs_product_code", "count"),
-    ).reset_index()
-    tm_title = "HS2 Chapter Composition (by trade volume)"
+    cutoff = scored["likelihood_score"].quantile(1 - keep_pct / 100)
+    kept = scored[scored["likelihood_score"] >= cutoff].copy()
 
-fig_tm = px.treemap(
-    agg_tm, path=["hs2_name"], values="value",
-    color="hs2_name",
-    color_discrete_sequence=GL_PALETTE_EXT,
-    title=tm_title,
-    custom_data=["hs2_code"],
-)
-fig_tm.update_traces(
-    hovertemplate="<b>%{label}</b><br>Value: %{value:,.0f}<extra></extra>",
-    textinfo="label+percent root",
-)
-fig_tm.update_layout(template=GL_TEMPLATE, height=420, margin=dict(t=50, l=10, r=10, b=10))
-st.plotly_chart(fig_tm, use_container_width=True)
+
+def quadrant(f, a):
+    if f >= 50 and a >= 50:
+        return "Top priority"
+    if a >= 50:
+        return "Strategic bet"
+    if f >= 50:
+        return "Low-hanging fruit"
+    return "Deprioritise"
+
+
+kept["quadrant"] = [quadrant(f, a) for f, a in zip(kept["feasibility_score"], kept["attractiveness_score"])]
+kept["hs6"] = kept["hs_product_code"].astype(str).str.zfill(6)
+kept["hs4"] = kept["hs6"].str[:4]
+kept["industry"] = kept["hs4"].map(lambda c: ui.short_label(U._HS4_DESC_LOOKUP.get(c, c), 45))
+kept["product"] = ui.product_names(kept)
+top = kept.nlargest(top_n, "composite_score").copy()
+
+# Save for comparison
+sb.header("Save this shortlist")
+# Key includes the theory and N so the suggested name updates when they change
+save_name = sb.text_input("Name", value=f"{theory} · top {top_n}", key=f"l_save_name_{theory}_{top_n}")
+if sb.button("Save for comparison", type="primary"):
+    ui.save_shortlist(save_name, top,
+                      f"{theory} theory · kept {keep_pct}% by likelihood · {feas_pct}F/{100 - feas_pct}A · top {top_n}")
+    sb.success(f"Saved “{save_name}”. Open Compare to see it.")
 
 # ============================================================
-# RANKED TABLE (Top N)
+# HEADER
 # ============================================================
-st.markdown(f"### Top {top_n_count} Candidates")
-st.caption("Scores are 0-100 percentile ranks. Higher = stronger candidate.")
+ui.page_header(
+    "Step 2 of 3 · Score and rank",
+    "Which candidates are likely to move, and which suit Morocco?",
+    lede=(
+        "Ranking happens in two passes. First, a <b>likelihood score</b> measures how strongly each product "
+        "is pushed to relocate, according to the theory chosen in the sidebar; the least likely are dropped. "
+        "Second, the products that remain are ranked on <b>feasibility</b> (is Morocco ready?) and "
+        "<b>attractiveness</b> (is the market worth it?)."
+    ),
+)
 
-top_df = selected.nlargest(top_n_count, "composite_score").reset_index(drop=True)
-top_df.index = top_df.index + 1
-top_df.index.name = "Rank"
-top_df["trade_fmt"] = top_df["global_export_value"].apply(format_dollars)
+w_total = sum(weights.values())
+w_text = ", ".join(f"{LIKE_LABELS[k].lower()} {100 * v / w_total:.0f}%" for k, v in weights.items() if v > 0)
+ui.small(
+    f"Theory: <b>{theory}</b> ({w_text})"
+    + (". Only CBAM-covered products are scored" if pre_filter == "cbam" else "")
+    + f". Candidate pool from step 1: {len(pool):,} products."
+)
 
-col_config_top = {
-    "hs4_code_str": st.column_config.TextColumn("HS4", width="small"),
-    "hs4_short":    st.column_config.TextColumn("Industry", width="large"),
-    "hs2_name":     st.column_config.TextColumn("Sector", width="medium"),
-    "composite_score": st.column_config.ProgressColumn(
-        f"Composite ({feas_pct}F/{attr_pct}A)", min_value=0, max_value=100, format="%.0f"
-    ),
-    "feasibility_score": st.column_config.ProgressColumn(
-        "Feasibility", min_value=0, max_value=100, format="%.0f"
-    ),
-    "attractiveness_score": st.column_config.ProgressColumn(
-        "Attractiveness", min_value=0, max_value=100, format="%.0f"
-    ),
-    "quadrant": st.column_config.TextColumn("Quadrant"),
-    "trade_fmt": st.column_config.TextColumn("Global Trade"),
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Products scored", f"{len(scored):,}")
+k2.metric(f"Kept (top {keep_pct}%)", f"{len(kept):,}")
+k3.metric(f"Top {top_n}: industries", f"{top['hs4'].nunique()}")
+k4.metric(f"Top {top_n}: world exports", ui.fmt_usd(top["global_export_value"].sum()))
+
+# ============================================================
+# SCATTER
+# ============================================================
+ui.chart_header(
+    "Feasibility against attractiveness",
+    f"Each dot is an HS6 product. <b style='color:{ui.ACCENT}'>Orange</b>: the Top {top_n} by composite score. "
+    f"<b>Black</b>: other products kept by likelihood. <span style='color:{ui.MUTED}'>Grey</span>: dropped by "
+    "likelihood. Dotted lines mark the 50th percentile on each axis. Dot size reflects world exports.",
+)
+plot_df = scored.copy()
+plot_df["status"] = "Dropped by likelihood"
+plot_df.loc[plot_df.index.isin(kept.index), "status"] = "Kept"
+plot_df.loc[plot_df.index.isin(top.index), "status"] = f"Top {top_n}"
+plot_df["size"] = 5 + 9 * (np.log10(plot_df["global_export_value"].clip(lower=1e6)) - 6) / 6
+plot_df["label"] = ui.product_names(plot_df)
+plot_df["hs6"] = plot_df["hs_product_code"].astype(str).str.zfill(6)
+
+fig = go.Figure()
+styles = {
+    "Dropped by likelihood": dict(color=ui.WASH, line=ui.RULE),
+    "Kept": dict(color=ui.INK, line=ui.INK),
+    f"Top {top_n}": dict(color=ui.ACCENT, line="white"),
 }
-show_top_cols = [c for c in [
-    "hs4_code_str", "hs4_short", "hs2_name",
-    "composite_score", "feasibility_score", "attractiveness_score",
-    "quadrant", "trade_fmt",
-] if c in top_df.columns]
-
-st.dataframe(top_df[show_top_cols], column_config=col_config_top,
-             use_container_width=True, height=500)
+for status, sty in styles.items():
+    d = plot_df[plot_df["status"] == status]
+    fig.add_trace(go.Scatter(
+        x=d["feasibility_score"], y=d["attractiveness_score"], mode="markers", name=status,
+        marker=dict(size=d["size"], color=sty["color"], line=dict(color=sty["line"], width=0.6),
+                    opacity=0.9 if status != "Kept" else 0.55),
+        customdata=np.stack([d["label"], d["hs6"], d["likelihood_score"], d["global_export_value"] / 1e9], axis=-1),
+        hovertemplate=("<b>%{customdata[0]}</b><br>HS6 %{customdata[1]}<br>Feasibility %{x:.0f} · "
+                       "Attractiveness %{y:.0f}<br>Likelihood %{customdata[2]:.0f}<br>"
+                       "World exports $%{customdata[3]:.1f}B<extra></extra>"),
+    ))
+for v in (50,):
+    fig.add_vline(x=v, line_dash="dot", line_color=ui.RULE)
+    fig.add_hline(y=v, line_dash="dot", line_color=ui.RULE)
+for x, y, t, xa, ya in [(99, 99, "Top priorities", "right", "top"), (1, 99, "Strategic bets", "left", "top"),
+                        (99, 1, "Low-hanging fruit", "right", "bottom"), (1, 1, "Deprioritise", "left", "bottom")]:
+    fig.add_annotation(x=x, y=y, text=t, showarrow=False, xanchor=xa, yanchor=ya,
+                       font=dict(family="JetBrains Mono, monospace", size=11, color=ui.MUTED))
+fig.update_layout(
+    height=560, xaxis=dict(title="Feasibility (Morocco's readiness, percentile)", range=[0, 100]),
+    yaxis=dict(title="Attractiveness (value of the market, percentile)", range=[0, 100],
+               showgrid=True, gridcolor=ui.WASH, griddash="dot"),
+)
+ui.plot(fig)
 
 # ============================================================
-# FEASIBILITY VS ATTRACTIVENESS SCATTER
+# TOP N TABLE
 # ============================================================
-st.divider()
-st.markdown(f"### Feasibility vs. Attractiveness — {len(selected):,} products ({chosen_scenario} scenario, cutoff={cutoff:.1f})")
-
-selected_idx = set(selected.index)
-top_idx      = set(selected.nlargest(top_n_count, "composite_score").index)
-
-# Show ALL products in the scored pool so the scatter visually responds to the
-# selection cutoff and scenario — selected products are highlighted in red,
-# unselected (below cutoff) in grey.
-plot_df = score_df.copy()
-plot_df["_color"] = plot_df.index.map(
-    lambda i: f"Top {top_n_count}" if i in top_idx
-              else "Selected" if i in selected_idx
-              else "Below cutoff"
+ui.chart_header(
+    f"Top {top_n} products",
+    f"Ranked by composite score = {feas_pct}% feasibility + {100 - feas_pct}% attractiveness. "
+    "All scores are percentile ranks within the candidate pool (0 to 100).",
 )
-plot_df["_size"]      = plot_df["global_export_value"].clip(lower=1).apply(np.log10)
-plot_df["_cbam_str"]  = plot_df["cbam_flag"].map({1: "Yes", 0: "No"}).fillna("No")
-plot_df["_trade_str"] = plot_df["global_export_value"].apply(format_dollars)
-plot_df["_hs6_str"]   = plot_df["hs_product_code"].astype(str).str.zfill(6)
-plot_df["_hs4_short"] = plot_df["hs_product_code"].astype(str).str.zfill(6).str[:4].map(
-    lambda c: (_HS4_DESC_LOOKUP.get(c, str(c))[:40])
-)
-
-fig_sc = px.scatter(
-    plot_df,
-    x="feasibility_score",
-    y="attractiveness_score",
-    size="_size",
-    size_max=20,
-    color="_color",
-    color_discrete_map={
-        f"Top {top_n_count}": MOROCCO_RED,
-        "Selected": "#204B82",
-        "Below cutoff": GREY,
+t = top.reset_index(drop=True)
+t.index = t.index + 1
+t.index.name = "Rank"
+st.dataframe(
+    t[["hs6", "product", "hs2_name", "composite_score", "feasibility_score",
+       "attractiveness_score", "quadrant", "global_export_value"]],
+    column_config={
+        "hs6": st.column_config.TextColumn("HS6", width="small"),
+        "product": st.column_config.TextColumn("Product", width="medium"),
+        "industry": st.column_config.TextColumn("Industry (HS4)", width="medium"),
+        "hs2_name": st.column_config.TextColumn("Sector", width="small"),
+        "composite_score": st.column_config.ProgressColumn("Composite", min_value=0, max_value=100, format="%.0f"),
+        "feasibility_score": st.column_config.NumberColumn("Feasibility", format="%.0f", width="small"),
+        "attractiveness_score": st.column_config.NumberColumn("Attractiveness", format="%.0f", width="small"),
+        "quadrant": st.column_config.TextColumn("Quadrant"),
+        "global_export_value": st.column_config.NumberColumn("World exports ($)", format="compact"),
     },
-    category_orders={"_color": ["Below cutoff", "Selected", f"Top {top_n_count}"]},
-    custom_data=["_hs4_short", "_hs6_str", "likelihood_score", "_trade_str", "_cbam_str"],
+    width="stretch", height=min(36 * len(t) + 40, 640),
 )
-fig_sc.update_traces(
-    hovertemplate=(
-        "<b>%{customdata[0]}</b><br>"
-        "HS6: %{customdata[1]}<br>"
-        "Likelihood: %{customdata[2]:.0f}<br>"
-        "Trade: %{customdata[3]}<br>"
-        "CBAM: %{customdata[4]}<extra></extra>"
-    )
-)
-# Fixed quadrant lines at 50
-fig_sc.add_vline(x=50, line_dash="dash", line_color="#204B82", opacity=0.4)
-fig_sc.add_hline(y=50, line_dash="dash", line_color="#204B82", opacity=0.4)
-fig_sc.update_layout(
-    xaxis_title="Feasibility Score (Morocco readiness)",
-    yaxis_title="Attractiveness Score (market opportunity)",
-    template=GL_TEMPLATE,
-    height=550,
-    legend=dict(orientation="h", yanchor="top", y=-0.1, xanchor="center", x=0.5),
-    margin=dict(b=100),
-)
-st.plotly_chart(fig_sc, use_container_width=True)
 
-# Tabs below scatter
-tab_detail, tab_tm2 = st.tabs(["Detail Table", "Top N Treemap"])
+left, right = st.columns([1, 1])
+with left:
+    ui.chart_header(f"Top {top_n} by sector", "Number of products in each HS2 chapter.")
+    by_sector = top.groupby("hs2_name").size().sort_values(ascending=False)
+    ui.plot(ui.hbar(by_sector.index, by_sector.values))
+with right:
+    ui.chart_header(f"Top {top_n} by quadrant", "Quadrants split each axis at the 50th percentile.")
+    order = ["Top priority", "Strategic bet", "Low-hanging fruit", "Deprioritise"]
+    q = top["quadrant"].value_counts().reindex(order).fillna(0)
+    ui.plot(ui.hbar(q.index, q.values, highlight=[i == 0 for i in range(len(q))]))
 
-with tab_detail:
-    detail_cols = [
-        "hs_product_code", "description", "hs4_code_str", "hs4_short", "hs2_name",
-        "composite_score", "feasibility_score", "attractiveness_score", "quadrant",
-        "rca_pctile", "density_pctile", "hhi_pctile", "distance_pctile",
-        "market_size_pctile", "attr_growth_pctile", "cog_pctile", "pci_pctile", "spillover_pctile",
-    ]
-    detail_cols = [c for c in detail_cols if c in selected.columns]
-    ranked = selected[detail_cols].sort_values("composite_score", ascending=False).reset_index(drop=True)
-    ranked.index = ranked.index + 1
-    ranked.index.name = "Rank"
-    st.dataframe(ranked, use_container_width=True, height=450)
-    download_csv(
-        selected, "powershoring_scored_products.csv",
-        f"{chosen_scenario} | Cutoff={cutoff:.1f} | {feas_pct}F/{attr_pct}A | {len(selected)} products",
-    )
+# ============================================================
+# COMPONENT DETAIL
+# ============================================================
+with st.expander("What drives each score (component percentiles for all kept products)"):
+    comp_cols = {
+        "hs6": "HS6", "product": "Product", "industry": "Industry (HS4)", "composite_score": "Composite",
+        "likelihood_score": "Likelihood",
+        "like_fuel": "L: fuel", "like_elec": "L: electricity", "like_vuln": "L: vulnerability",
+        "like_cbam": "L: CBAM", "like_growth": "L: growth",
+        "feas_density": "F: density", "feas_rca": "F: RCA", "feas_hhi": "F: openness", "feas_distance": "F: distance",
+        "attr_pci": "A: PCI", "attr_cog": "A: COG", "attr_market_size": "A: market size",
+        "attr_growth": "A: growth", "attr_spillover": "A: spillover",
+    }
+    detail = kept.sort_values("composite_score", ascending=False)[list(comp_cols)].rename(columns=comp_cols)
+    st.dataframe(detail.round(0), hide_index=True, width="stretch", height=420)
+    ui.small("L = likelihood component, F = feasibility component, A = attractiveness component. "
+             "Each is a percentile rank (0 to 100).")
+    U.download_csv(kept, "powershoring_scored_products.csv",
+                   f"{theory} | kept {keep_pct}% | {feas_pct}F/{100 - feas_pct}A | {len(kept)} products")
 
-with tab_tm2:
-    top_n_prods = selected.nlargest(top_n_count, "composite_score")
-    agg_top = top_n_prods.groupby(["hs2_code", "hs2_name"]).agg(
-        value=("global_export_value", "sum"),
-        n_products=("hs_product_code", "count"),
-    ).reset_index()
-    fig_tm2 = px.treemap(
-        agg_top, path=["hs2_name"], values="value",
-        color="hs2_name",
-        color_discrete_sequence=GL_PALETTE_EXT,
-        title=f"Top {top_n_count} Products by HS2 Chapter",
-    )
-    fig_tm2.update_traces(textinfo="label+percent root")
-    fig_tm2.update_layout(template=GL_TEMPLATE, height=450, margin=dict(t=50, l=10, r=10, b=10))
-    st.plotly_chart(fig_tm2, use_container_width=True)
-
-# Stage gate
 st.divider()
-st.success(f"{len(selected):,} products scored and ranked. View the full cross-scenario analysis in Scenarios.")
-if st.button("View Scenario Analysis", type="primary"):
-    st.switch_page("pages/3_Scenarios.py")
+st.page_link("pages/3_Scenarios.py", label="Next: compare all four theories  →")

@@ -26,7 +26,7 @@ DATA_DIR = LOCAL_DATA_DIR if os.path.exists(os.path.join(LOCAL_DATA_DIR, "master
 MASTER_DATA = os.path.join(DATA_DIR, "master_product_data.parquet")
 HS4_DESCRIPTIONS = os.path.join(DATA_DIR, "hs4_descriptions.csv")
 
-METHODOLOGY_VERSION = "2026-04-28_four_scenario_fixed_fa_universe_v1"
+METHODOLOGY_VERSION = "2026-10-06_four_scenario_cbam_no_likelihood_gate_v2"
 FA_PERCENTILE_UNIVERSE = "stage1_candidate_pool"
 
 DEFAULT_ENERGY_PERCENTILE = 0.75
@@ -334,24 +334,35 @@ SCENARIO_DEFS = {
     "No Prior": {
         "weights": {"fuel": 0, "elec": 33, "vuln": 33, "cbam": 33, "growth": 0},
         "pre_filter": None,
+        "likelihood_top_share": 0.5,
         "desc": "Equal weight on electricity intensity, incumbent vulnerability, and CBAM exposure. No prior assumption about which relocation driver dominates.",
     },
     "Electricity Cost": {
         "weights": {"fuel": 0, "elec": 100, "vuln": 0, "cbam": 0, "growth": 0},
         "pre_filter": None,
+        "likelihood_top_share": 0.5,
         "desc": "Pure electricity cost mechanism. Selects industries where electricity is the largest share of production costs.",
     },
     "Carbon Regulation": {
         "weights": {"fuel": 0, "elec": 0, "vuln": 0, "cbam": 100, "growth": 0},
         "pre_filter": "cbam",
-        "desc": "EU carbon border pressure. Pre-filtered to CBAM-covered products, ranked by combined energy intensity and EU market exposure.",
+        # The CBAM pre-filter is this scenario's gate. Halving the CBAM pool
+        # again by likelihood left exactly 30 HS4 codes (so the Top 30 was not
+        # a ranking) and dropped every fertilizer product (low EU import share).
+        "likelihood_top_share": 1.0,
+        "desc": "EU carbon border pressure. All CBAM-covered products in the candidate pool are ranked on feasibility and attractiveness.",
     },
     "Disruption Opportunity": {
         "weights": {"fuel": 0, "elec": 0, "vuln": 100, "cbam": 0, "growth": 0},
         "pre_filter": None,
+        "likelihood_top_share": 0.5,
         "desc": "Disruption opportunity. Where current top exporters are most energy-deficit and therefore most vulnerable to powershoring competition.",
     },
 }
+
+# A product is "robust" if it appears in the Top N of at least this many
+# scenarios (matches the chapter's definition).
+ROBUST_MIN_SCENARIOS = 2
 
 DEFAULT_FEAS_WEIGHTS = {"rca": 20, "density": 50, "hhi": 15, "distance": 15}
 DEFAULT_ATTR_WEIGHTS = {"market_size": 15, "growth": 15, "cog": 30, "pci": 30, "spillover": 10}
@@ -568,8 +579,9 @@ def add_feasibility_attractiveness_scores(df, feas_weights, attr_weights, refere
     return out
 
 
-def run_scenario_scoring(df, likelihood_weights, feas_weights, attr_weights, fa_reference_df=None):
-    """Run full pipeline: likelihood → top 50% filter → F/A scoring.
+def run_scenario_scoring(df, likelihood_weights, feas_weights, attr_weights,
+                         fa_reference_df=None, likelihood_top_share=0.5):
+    """Run full pipeline: likelihood → top-share filter → F/A scoring.
 
     Args:
         df: Filtered product DataFrame (Stage 1 output).
@@ -578,6 +590,9 @@ def run_scenario_scoring(df, likelihood_weights, feas_weights, attr_weights, fa_
         attr_weights: Dict with keys market_size, growth, cog, pci, spillover.
         fa_reference_df: Universe used for F/A percentile ranks. Pass the full
             Stage 1 pool for cross-scenario comparability.
+        likelihood_top_share: Share of products kept by likelihood score
+            (0.5 = top half). Use the scenario's `likelihood_top_share`;
+            1.0 keeps every product (no likelihood gate).
 
     Returns:
         Scored DataFrame with likelihood, feasibility, attractiveness scores
@@ -591,8 +606,10 @@ def run_scenario_scoring(df, likelihood_weights, feas_weights, attr_weights, fa_
         reference_df=fa_reference_df if fa_reference_df is not None else d,
     )
 
-    # Top 50% by likelihood
-    cutoff = d["likelihood_score"].quantile(0.5)
+    # Keep the top share by likelihood (1.0 = keep everything)
+    if likelihood_top_share >= 1:
+        return d.copy()
+    cutoff = d["likelihood_score"].quantile(1 - likelihood_top_share)
     sel = d[d["likelihood_score"] >= cutoff].copy()
     return sel
 
@@ -675,3 +692,81 @@ def aggregate_to_hs4(sel):
         rows.append(r)
 
     return pd.DataFrame(rows)
+
+
+# ============================================================
+# CROSS-SCENARIO ENGINE (shared by the Shortlist and Scenarios pages)
+# ============================================================
+def run_all_scenarios(filtered, feas_weights=None, attr_weights=None,
+                      feas_share=0.60, scenario_names=None):
+    """Score every scenario on one Stage 1 pool.
+
+    Args:
+        filtered: Stage 1 candidate pool.
+        feas_weights / attr_weights: component weights (defaults if None).
+        feas_share: weight on feasibility in the composite (0-1).
+        scenario_names: subset of SCENARIO_DEFS keys (all if None).
+
+    Returns:
+        {scenario: {"selected": HS6 DataFrame, "hs4": HS4 DataFrame}}
+    """
+    feas_weights = feas_weights or DEFAULT_FEAS_WEIGHTS
+    attr_weights = attr_weights or DEFAULT_ATTR_WEIGHTS
+    results = {}
+    for name in (scenario_names or list(SCENARIO_DEFS.keys())):
+        sdef = SCENARIO_DEFS[name]
+        input_df = filtered
+        if sdef.get("pre_filter") == "cbam":
+            input_df = filtered[filtered["cbam_flag"] == 1].copy()
+        sel = run_scenario_scoring(
+            input_df, sdef["weights"], feas_weights, attr_weights,
+            fa_reference_df=filtered,
+            likelihood_top_share=sdef.get("likelihood_top_share", 0.5),
+        )
+        sel["composite_score"] = (
+            feas_share * sel["feasibility_score"]
+            + (1 - feas_share) * sel["attractiveness_score"]
+        )
+        results[name] = {"selected": sel, "hs4": aggregate_to_hs4(sel)}
+    return results
+
+
+def robustness_table(results, top_n=30, level="HS4"):
+    """One row per code that appears in any scenario's Top N.
+
+    Columns: code, description, hs2_name, one True/False column per scenario,
+    n_scenarios, average composite / feasibility / attractiveness across the
+    scenarios where the code appears, and global export value.
+    """
+    code_col = "hs4_code" if level == "HS4" else "hs_product_code"
+    src_key = "hs4" if level == "HS4" else "selected"
+    names = list(results.keys())
+
+    tops = {}
+    for name in names:
+        top = results[name][src_key].nlargest(top_n, "composite_score").copy()
+        top["_code"] = top[code_col].astype(str)
+        tops[name] = top.set_index("_code")
+
+    all_codes = sorted(set().union(*[set(t.index) for t in tops.values()])) if tops else []
+    rows = []
+    for code in all_codes:
+        hits = [n for n in names if code in tops[n].index]
+        first = tops[hits[0]].loc[code]
+        row = {
+            "code": code,
+            "description": str(first.get("description", "")),
+            "hs2_name": str(first.get("hs2_name", "")),
+        }
+        for n in names:
+            row[n] = n in hits
+        row["n_scenarios"] = len(hits)
+        for col in ["composite_score", "feasibility_score", "attractiveness_score"]:
+            row[col] = float(np.mean([tops[n].loc[code, col] for n in hits]))
+        row["global_export_value"] = float(first.get("global_export_value", 0))
+        rows.append(row)
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values(["n_scenarios", "composite_score"], ascending=[False, False]).reset_index(drop=True)
